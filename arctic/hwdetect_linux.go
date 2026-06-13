@@ -17,7 +17,7 @@ func detectRAM() (total, avail float64) {
 	if err != nil {
 		return 0, 0
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var totalKB, availKB, freeKB, buffersKB, cachedKB int64
 	sc := bufio.NewScanner(f)
