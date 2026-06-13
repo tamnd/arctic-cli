@@ -1,0 +1,10 @@
+title       = "arctic"
+baseURL     = "https://arctic-cli.tamnd.com/"
+description = "A command line for the bulk Reddit archive. One binary that pulls the monthly dumps from the public torrent catalog and the Arctic Shift backfill API, decompresses the zstd JSONL, writes Parquet, keeps a local index, and can publish the shards to a Hugging Face dataset."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/arctic-cli"
