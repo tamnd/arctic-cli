@@ -40,7 +40,9 @@ arctic stats --by month --fields month,records
 ```
 
 The field names are the record's keys, which match the JSON output, so
-`arctic query golang -o json -n 1` shows you every available name.
+`arctic query golang -o json -n 1` shows you every available name. `--fields`
+works the same across every format: `table`, `csv`, and `tsv` keep those
+columns in that order, and `json` and `jsonl` project the same ordered subset.
 
 `--no-header` drops the header row in `table`, `csv`, and `tsv` output, which is
 handy when a downstream tool expects bare rows.

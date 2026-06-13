@@ -84,20 +84,57 @@ func DefaultDataDir() string {
 	return filepath.Join(home, ".local", "share", "arctic")
 }
 
-// DefaultConfig returns a Config with the standard paths and tunables.
+// DefaultConfig returns a Config with the standard paths and tunables. The
+// ARCTIC_* environment variables override the defaults; a flag the CLI sets
+// later overrides the environment in turn.
 func DefaultConfig() Config {
 	data := DefaultDataDir()
-	return Config{
+	c := Config{
 		DataDir:        data,
-		RawDir:         filepath.Join(data, "raw"),
-		WorkDir:        filepath.Join(data, "work"),
-		RepoRoot:       filepath.Join(data, "repo"),
+		RawDir:         envOr(EnvRawDir, filepath.Join(data, "raw")),
+		WorkDir:        envOr(EnvWorkDir, filepath.Join(data, "work")),
+		RepoRoot:       envOr(EnvRepoRoot, filepath.Join(data, "repo")),
 		HFRepo:         DefaultHFRepo,
 		Engine:         DefaultEngine(),
 		ChunkLines:     DefaultChunkLines,
 		MinFreeGB:      DefaultMinFreeGB,
 		MaxCommitStall: 45 * time.Minute,
 	}
+	if v := os.Getenv(EnvEngine); v != "" {
+		c.Engine = Engine(v)
+	}
+	if n := envInt(EnvChunkLines); n > 0 {
+		c.ChunkLines = n
+	}
+	if n := envInt(EnvMinFreeGB); n > 0 {
+		c.MinFreeGB = n
+	}
+	return c
+}
+
+// envOr returns the environment value for key, or def when it is unset.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// envInt parses the environment value for key as an int, returning 0 when it is
+// unset or not a number.
+func envInt(key string) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0
+	}
+	n := 0
+	for _, c := range v {
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
 
 // IndexPath is the local catalog database path.
