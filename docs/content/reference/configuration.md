@@ -83,7 +83,7 @@ arctic sub golang --api --user-agent "my-archiver/1.0" --timeout 90s
 | Flag | Default | Meaning |
 |---|---|---|
 | `-j, --workers` | `0` | Concurrent workers; `0` uses the computed budget |
-| `--chunk-lines` | engine default | JSONL lines per Parquet shard |
+| `--chunk-lines` | `500000` | JSONL lines per Parquet shard |
 | `--timeout` | `60s` | Per-request timeout on the API path |
 
 `--workers 0` lets arctic size the parallelism from the detected machine. A
@@ -92,9 +92,18 @@ concurrency). See [the hardware budget](/guides/hardware-budget/).
 
 ## Environment variables
 
+Every variable is overridden by the matching flag when you pass one, so the
+order of precedence is flag, then environment, then the built-in default.
+
 | Variable | Used for |
 |---|---|
 | `ARCTIC_DATA_DIR` | Root data directory (overrides the XDG default) |
+| `ARCTIC_RAW_DIR` | Where downloaded `.zst` files land |
+| `ARCTIC_WORK_DIR` | Conversion scratch and the Parquet shards |
+| `ARCTIC_REPO_ROOT` | Local staging tree for a `publish` run |
+| `ARCTIC_ENGINE` | Conversion engine, `go` or `duckdb` |
+| `ARCTIC_CHUNK_LINES` | JSONL lines per Parquet shard |
+| `ARCTIC_MIN_FREE_GB` | Free-disk floor a `publish` refuses to start below |
 | `HF_TOKEN` | Hugging Face write token for `publish --commit` |
 
 ## Global flags
@@ -113,7 +122,7 @@ concurrency). See [the hardware budget](/guides/hardware-budget/).
 | `--raw-dir` | under data dir | Where downloaded `.zst` files land |
 | `--work-dir` | under data dir | Conversion scratch and shards |
 | `--engine` | `go` | Conversion engine: `go` or `duckdb` |
-| `--chunk-lines` | engine default | JSONL lines per Parquet shard |
+| `--chunk-lines` | `500000` | JSONL lines per Parquet shard |
 | `--timeout` | `60s` | Per-request timeout for the API path |
 | `--user-agent` | arctic default | User-Agent on the API path |
 

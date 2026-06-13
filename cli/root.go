@@ -125,13 +125,13 @@ func (a *App) setup(cmd *cobra.Command) error {
 	// --data-dir keeps everything together. An explicit --raw-dir/--work-dir
 	// still wins.
 	if f := cmd.Flags(); f.Changed("data-dir") {
-		if !f.Changed("raw-dir") {
+		if !f.Changed("raw-dir") && os.Getenv(arctic.EnvRawDir) == "" {
 			a.cfg.RawDir = filepath.Join(a.cfg.DataDir, "raw")
 		}
-		if !f.Changed("work-dir") {
+		if !f.Changed("work-dir") && os.Getenv(arctic.EnvWorkDir) == "" {
 			a.cfg.WorkDir = filepath.Join(a.cfg.DataDir, "work")
 		}
-		if !f.Changed("repo-root") {
+		if !f.Changed("repo-root") && os.Getenv(arctic.EnvRepoRoot) == "" {
 			a.cfg.RepoRoot = filepath.Join(a.cfg.DataDir, "repo")
 		}
 	}
