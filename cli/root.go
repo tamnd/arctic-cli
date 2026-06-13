@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/mattn/go-isatty"
@@ -118,7 +119,22 @@ func NewRootCmd() *cobra.Command {
 }
 
 // setup resolves output defaults and the conversion engine.
-func (a *App) setup(_ *cobra.Command) error {
+func (a *App) setup(cmd *cobra.Command) error {
+	// When --data-dir moves the root but the sub-directory flags are left at
+	// their defaults, re-root them under the new data dir so a single
+	// --data-dir keeps everything together. An explicit --raw-dir/--work-dir
+	// still wins.
+	if f := cmd.Flags(); f.Changed("data-dir") {
+		if !f.Changed("raw-dir") {
+			a.cfg.RawDir = filepath.Join(a.cfg.DataDir, "raw")
+		}
+		if !f.Changed("work-dir") {
+			a.cfg.WorkDir = filepath.Join(a.cfg.DataDir, "work")
+		}
+		if !f.Changed("repo-root") {
+			a.cfg.RepoRoot = filepath.Join(a.cfg.DataDir, "repo")
+		}
+	}
 	if a.output == "" || a.output == "auto" {
 		if isatty.IsTerminal(os.Stdout.Fd()) {
 			a.output = string(FormatTable)

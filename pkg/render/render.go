@@ -5,6 +5,7 @@
 package render
 
 import (
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -95,22 +96,101 @@ func (r *Renderer) Render(records any) error {
 }
 
 func (r *Renderer) renderJSON(items []any) error {
-	enc := json.NewEncoder(r.w)
-	enc.SetIndent("", "  ")
-	if len(items) == 1 {
-		return enc.Encode(items[0])
+	if len(r.Fields) == 0 {
+		enc := json.NewEncoder(r.w)
+		enc.SetIndent("", "  ")
+		if len(items) == 1 {
+			return enc.Encode(items[0])
+		}
+		return enc.Encode(items)
 	}
-	return enc.Encode(items)
+	var compact bytes.Buffer
+	if len(items) == 1 {
+		b, err := r.orderedObject(items[0])
+		if err != nil {
+			return err
+		}
+		compact.Write(b)
+	} else {
+		compact.WriteByte('[')
+		for i, it := range items {
+			if i > 0 {
+				compact.WriteByte(',')
+			}
+			b, err := r.orderedObject(it)
+			if err != nil {
+				return err
+			}
+			compact.Write(b)
+		}
+		compact.WriteByte(']')
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, compact.Bytes(), "", "  "); err != nil {
+		return err
+	}
+	pretty.WriteByte('\n')
+	_, err := r.w.Write(pretty.Bytes())
+	return err
 }
 
 func (r *Renderer) renderJSONL(items []any) error {
-	enc := json.NewEncoder(r.w)
+	if len(r.Fields) == 0 {
+		enc := json.NewEncoder(r.w)
+		for _, it := range items {
+			if err := enc.Encode(it); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for _, it := range items {
-		if err := enc.Encode(it); err != nil {
+		b, err := r.orderedObject(it)
+		if err != nil {
+			return err
+		}
+		if _, err := r.w.Write(append(b, '\n')); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// orderedObject marshals an item's --fields columns as a compact JSON object,
+// in the order the columns were given, so json and jsonl project the same
+// subset that table, csv, and tsv do. A column the record does not carry is
+// skipped rather than emitted as null.
+func (r *Renderer) orderedObject(item any) ([]byte, error) {
+	full, ok := toAnyMap(item).(map[string]any)
+	if !ok {
+		return json.Marshal(item)
+	}
+	var b bytes.Buffer
+	b.WriteByte('{')
+	first := true
+	for _, c := range r.Fields {
+		v, present := full[c]
+		if !present {
+			continue
+		}
+		key, err := json.Marshal(c)
+		if err != nil {
+			return nil, err
+		}
+		val, err := json.Marshal(v)
+		if err != nil {
+			return nil, err
+		}
+		if !first {
+			b.WriteByte(',')
+		}
+		first = false
+		b.Write(key)
+		b.WriteByte(':')
+		b.Write(val)
+	}
+	b.WriteByte('}')
+	return b.Bytes(), nil
 }
 
 func (r *Renderer) renderTemplate(items []any) error {

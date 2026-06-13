@@ -43,6 +43,33 @@ func TestJSONL(t *testing.T) {
 	}
 }
 
+func TestJSONLFieldsProjectInOrder(t *testing.T) {
+	out := render(t, FormatJSONL, []string{"score", "id"}, false, "")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want 2 lines, got %d: %q", len(lines), out)
+	}
+	if lines[0] != `{"score":10,"id":"a1"}` {
+		t.Errorf("line 0 = %q, want the score,id subset in order", lines[0])
+	}
+	if strings.Contains(out, `"title"`) || strings.Contains(out, `"url"`) {
+		t.Errorf("unselected fields leaked: %q", out)
+	}
+}
+
+func TestJSONFieldsProjectArray(t *testing.T) {
+	out := render(t, FormatJSON, []string{"id", "score"}, false, "")
+	if !strings.HasPrefix(strings.TrimSpace(out), "[") {
+		t.Errorf("want a pretty array, got %q", out)
+	}
+	if !strings.Contains(out, `"id": "a1"`) || !strings.Contains(out, `"score": 10`) {
+		t.Errorf("missing projected fields: %q", out)
+	}
+	if strings.Contains(out, `"tags"`) {
+		t.Errorf("unselected field leaked: %q", out)
+	}
+}
+
 func TestCSVHeaderAndFields(t *testing.T) {
 	out := render(t, FormatCSV, []string{"id", "score", "tags"}, false, "")
 	lines := strings.Split(strings.TrimSpace(out), "\n")
