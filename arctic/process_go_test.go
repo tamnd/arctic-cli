@@ -20,14 +20,14 @@ func writeZst(t *testing.T, path string, lines [][]byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	enc, err := zstd.NewWriter(f)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, l := range lines {
-		enc.Write(l)
-		enc.Write([]byte{'\n'})
+		_, _ = enc.Write(l)
+		_, _ = enc.Write([]byte{'\n'})
 	}
 	if err := enc.Close(); err != nil {
 		t.Fatal(err)

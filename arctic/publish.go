@@ -400,10 +400,10 @@ func (p *publisher) recordAndREADME(ctx context.Context, job *publishJob) error 
 
 func (p *publisher) cleanup(job *publishJob) {
 	if job.zstPath != "" {
-		os.Remove(job.zstPath)
+		_ = os.Remove(job.zstPath)
 	}
 	dir := filepath.Dir(filepath.Join(p.cfg.RepoRoot, ShardHFPath(job.Type, job.Month, 0)))
-	os.RemoveAll(dir)
+	_ = os.RemoveAll(dir)
 }
 
 // watchStall cancels the run when no commit has progressed within

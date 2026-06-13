@@ -37,7 +37,7 @@ func OpenIndex(path string) (*Index, error) {
 	}
 	idx := &Index{db: db}
 	if err := idx.migrate(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return idx, nil
@@ -111,7 +111,7 @@ ORDER BY entity, type`
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []StatRow
 	for rows.Next() {

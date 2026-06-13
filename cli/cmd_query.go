@@ -174,7 +174,7 @@ func (a *App) statsCmd() *cobra.Command {
 			if err != nil {
 				return codeError(exitError, err)
 			}
-			defer idx.Close()
+			defer func() { _ = idx.Close() }()
 			rows, err := idx.Stats(by)
 			if err != nil {
 				return codeError(exitError, err)
@@ -194,10 +194,7 @@ func (a *App) infoCmd() *cobra.Command {
 		Short: "Report detected hardware, the work budget, and storage paths",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			hw := arctic.DetectHardware(a.cfg.WorkDir)
-			b := arctic.ComputeBudget(hw)
-			if a.workers > 0 {
-				b.MaxConvertWorkers = a.workers
-			}
+			b := a.budget()
 			row := infoRow{
 				OS:                hw.OS,
 				Hostname:          hw.Hostname,

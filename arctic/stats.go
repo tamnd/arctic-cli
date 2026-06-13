@@ -48,7 +48,7 @@ func ReadStats(path string) ([]StatsRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	r := csv.NewReader(f)
 	r.FieldsPerRecord = -1
@@ -112,14 +112,14 @@ func WriteStats(path string, rows []StatsRow) error {
 	}
 	tmpPath := tmp.Name()
 	defer func() {
-		tmp.Close()
-		os.Remove(tmpPath)
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 	}()
 
 	w := csv.NewWriter(tmp)
-	w.Write(statsHeader)
+	_ = w.Write(statsHeader)
 	for _, r := range merged {
-		w.Write(statsRecord(r))
+		_ = w.Write(statsRecord(r))
 	}
 	w.Flush()
 	if err := w.Error(); err != nil {

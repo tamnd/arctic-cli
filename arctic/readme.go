@@ -23,7 +23,7 @@ func GenerateREADME(cfg Config, rows []StatsRow) string {
 	b.WriteString("pretty_name: Reddit Public Archive (Parquet)\n")
 	b.WriteString("tags:\n  - reddit\n  - social-media\n  - text\n  - parquet\n")
 	b.WriteString("task_categories:\n  - text-classification\n  - text-generation\n")
-	b.WriteString(fmt.Sprintf("size_categories:\n  - %s\n", sizeCategory(totalRecords(rows))))
+	fmt.Fprintf(&b, "size_categories:\n  - %s\n", sizeCategory(totalRecords(rows)))
 	b.WriteString("---\n\n")
 
 	b.WriteString("# Reddit Public Archive\n\n")
@@ -113,19 +113,19 @@ func writeCoverageSection(b *strings.Builder, rows []StatsRow) {
 	}
 	first, last := monthBounds(committed)
 
-	b.WriteString(fmt.Sprintf("Months covered: **%d** (%s to %s).\n\n", len(months), first, last))
+	fmt.Fprintf(b, "Months covered: **%d** (%s to %s).\n\n", len(months), first, last)
 	b.WriteString("| type | months | shards | records | parquet size |\n")
 	b.WriteString("| --- | --- | --- | --- | --- |\n")
-	b.WriteString(fmt.Sprintf("| comments | %d | %d | %s | %s |\n",
+	fmt.Fprintf(b, "| comments | %d | %d | %s | %s |\n",
 		countMonths(committed, string(TypeComments)), comments.Shards,
-		humanCount(comments.Count), humanBytes(comments.SizeBytes)))
-	b.WriteString(fmt.Sprintf("| submissions | %d | %d | %s | %s |\n",
+		humanCount(comments.Count), humanBytes(comments.SizeBytes))
+	fmt.Fprintf(b, "| submissions | %d | %d | %s | %s |\n",
 		countMonths(committed, string(TypeSubmissions)), submissions.Shards,
-		humanCount(submissions.Count), humanBytes(submissions.SizeBytes)))
-	b.WriteString(fmt.Sprintf("| **total** | %d | %d | %s | %s |\n\n",
+		humanCount(submissions.Count), humanBytes(submissions.SizeBytes))
+	fmt.Fprintf(b, "| **total** | %d | %d | %s | %s |\n\n",
 		len(months), comments.Shards+submissions.Shards,
 		humanCount(comments.Count+submissions.Count),
-		humanBytes(comments.SizeBytes+submissions.SizeBytes)))
+		humanBytes(comments.SizeBytes+submissions.SizeBytes))
 }
 
 func writeUsageSection(b *strings.Builder, cfg Config) {
@@ -137,25 +137,25 @@ func writeUsageSection(b *strings.Builder, cfg Config) {
 
 	b.WriteString("DuckDB, straight off the hub:\n\n")
 	b.WriteString("```sql\n")
-	b.WriteString(fmt.Sprintf("SELECT subreddit, count(*) AS comments\n"+
+	fmt.Fprintf(b, "SELECT subreddit, count(*) AS comments\n"+
 		"FROM 'hf://datasets/%s/data/comments/2011/*/*.parquet'\n"+
-		"GROUP BY subreddit ORDER BY comments DESC LIMIT 10;\n", repo))
+		"GROUP BY subreddit ORDER BY comments DESC LIMIT 10;\n", repo)
 	b.WriteString("```\n\n")
 
 	b.WriteString("pandas:\n\n")
 	b.WriteString("```python\n")
 	b.WriteString("import pandas as pd\n")
-	b.WriteString(fmt.Sprintf("df = pd.read_parquet(\n"+
-		"    \"hf://datasets/%s/data/submissions/2011/03/000.parquet\"\n)\n", repo))
+	fmt.Fprintf(b, "df = pd.read_parquet(\n"+
+		"    \"hf://datasets/%s/data/submissions/2011/03/000.parquet\"\n)\n", repo)
 	b.WriteString("```\n\n")
 
 	b.WriteString("datasets:\n\n")
 	b.WriteString("```python\n")
 	b.WriteString("from datasets import load_dataset\n")
-	b.WriteString(fmt.Sprintf("ds = load_dataset(\n"+
+	fmt.Fprintf(b, "ds = load_dataset(\n"+
 		"    \"%s\",\n"+
 		"    data_files=\"data/comments/2011/03/*.parquet\",\n"+
-		"    split=\"train\",\n)\n", repo))
+		"    split=\"train\",\n)\n", repo)
 	b.WriteString("```\n\n")
 }
 

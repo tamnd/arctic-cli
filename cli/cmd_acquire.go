@@ -243,7 +243,7 @@ func (a *App) acquireEntity(ctx context.Context, kind, name string, types []arct
 				return codeError(exitError, zerr)
 			}
 			zstPath = zp
-			defer os.Remove(zp)
+			defer func() { _ = os.Remove(zp) }()
 		}
 		if noImport || zstPath == "" {
 			continue
@@ -364,7 +364,7 @@ func compressJSONL(jsonlPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	zstPath := strings.TrimSuffix(jsonlPath, ".jsonl") + ".zst"
 	out, err := os.Create(zstPath)
 	if err != nil {
@@ -372,16 +372,16 @@ func compressJSONL(jsonlPath string) (string, error) {
 	}
 	enc, err := zstd.NewWriter(out)
 	if err != nil {
-		out.Close()
+		_ = out.Close()
 		return "", err
 	}
 	if _, err := enc.ReadFrom(in); err != nil {
-		enc.Close()
-		out.Close()
+		_ = enc.Close()
+		_ = out.Close()
 		return "", err
 	}
 	if err := enc.Close(); err != nil {
-		out.Close()
+		_ = out.Close()
 		return "", err
 	}
 	return zstPath, out.Close()
@@ -393,9 +393,7 @@ func normalizeName(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.Trim(s, "/")
 	for _, p := range []string{"r/", "u/", "user/"} {
-		if strings.HasPrefix(s, p) {
-			s = s[len(p):]
-		}
+		s = strings.TrimPrefix(s, p)
 	}
 	return s
 }

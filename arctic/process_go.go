@@ -53,24 +53,24 @@ func writeShard[T any](ctx context.Context, rows []T, shardPath string) (int64, 
 			end = len(rows)
 		}
 		if _, err := w.Write(rows[i:end]); err != nil {
-			w.Close()
-			f.Close()
-			os.Remove(shardPath)
+			_ = w.Close()
+			_ = f.Close()
+			_ = os.Remove(shardPath)
 			return 0, fmt.Errorf("write rows: %w", err)
 		}
 	}
 	if err := w.Close(); err != nil {
-		f.Close()
-		os.Remove(shardPath)
+		_ = f.Close()
+		_ = os.Remove(shardPath)
 		return 0, fmt.Errorf("close writer: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(shardPath)
+		_ = os.Remove(shardPath)
 		return 0, fmt.Errorf("close file: %w", err)
 	}
 
 	if err := ValidateParquet(shardPath); err != nil {
-		os.Remove(shardPath)
+		_ = os.Remove(shardPath)
 		return 0, fmt.Errorf("validate shard: %w", err)
 	}
 	fi, err := os.Stat(shardPath)

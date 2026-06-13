@@ -35,7 +35,7 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 			return ProcessResult{}, err
 		}
 	}
-	defer os.RemoveAll(work)
+	defer func() { _ = os.RemoveAll(work) }()
 
 	zstdDecoderSem.Lock()
 	f, err := os.Open(zstPath)
@@ -45,7 +45,7 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 	}
 	dec, err := zstd.NewReader(f, zstd.WithDecoderMaxWindow(1<<31))
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		zstdDecoderSem.Unlock()
 		return ProcessResult{}, fmt.Errorf("zstd reader: %w", err)
 	}
@@ -76,7 +76,7 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 	}
 	if err := openChunk(); err != nil {
 		dec.Close()
-		f.Close()
+		_ = f.Close()
 		zstdDecoderSem.Unlock()
 		return res, err
 	}
@@ -88,7 +88,9 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 		if err := chunkWriter.Flush(); err != nil {
 			return err
 		}
-		chunkFile.Close()
+		if err := chunkFile.Close(); err != nil {
+			return err
+		}
 		lineInChunk = 0
 		return openChunk()
 	}
@@ -108,8 +110,8 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 			res.SkippedLines++
 			continue
 		}
-		chunkWriter.Write(line)
-		chunkWriter.WriteByte('\n')
+		_, _ = chunkWriter.Write(line)
+		_ = chunkWriter.WriteByte('\n')
 		lineInChunk++
 		if lineInChunk >= chunkLines {
 			if err := flush(); err != nil {
@@ -121,13 +123,14 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 	if loopErr == nil {
 		if err := scanner.Err(); err != nil {
 			loopErr = fmt.Errorf("scan jsonl: %w", err)
-		} else {
-			chunkWriter.Flush()
-			chunkFile.Close()
+		} else if err := chunkWriter.Flush(); err != nil {
+			loopErr = err
+		} else if err := chunkFile.Close(); err != nil {
+			loopErr = err
 		}
 	}
 	dec.Close()
-	f.Close()
+	_ = f.Close()
 	zstdDecoderSem.Unlock()
 	if loopErr != nil {
 		return res, loopErr
@@ -147,7 +150,7 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 			return res, err
 		}
 		if err := ValidateParquet(shardPath); err != nil {
-			os.Remove(shardPath)
+			_ = os.Remove(shardPath)
 			return res, fmt.Errorf("validate shard %d: %w", shardN, err)
 		}
 		res.Shards++
@@ -166,15 +169,19 @@ func duckConvert(ctx context.Context, cfg Config, chunkPath string, t Type, shar
 	if err != nil {
 		return 0, 0, fmt.Errorf("duckdb open: %w", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	threads := runtime.NumCPU()
 	if threads < 1 {
 		threads = 1
 	}
-	db.ExecContext(ctx, fmt.Sprintf("SET threads = %d", threads))
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("SET threads = %d", threads)); err != nil {
+		return 0, 0, fmt.Errorf("duckdb set threads: %w", err)
+	}
 	if cfg.DuckDBMemoryMB > 0 {
-		db.ExecContext(ctx, fmt.Sprintf("SET memory_limit='%dMB'", cfg.DuckDBMemoryMB))
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("SET memory_limit='%dMB'", cfg.DuckDBMemoryMB)); err != nil {
+			return 0, 0, fmt.Errorf("duckdb set memory_limit: %w", err)
+		}
 	}
 
 	esc := func(s string) string { return strings.ReplaceAll(s, "'", "''") }
@@ -190,7 +197,7 @@ FROM read_json('%s', format='newline_delimited', columns=%s,
 		selectCols, esc(chunkPath), readCols, esc(shardPath))
 
 	if _, err := db.ExecContext(ctx, copySQL); err != nil {
-		os.Remove(shardPath)
+		_ = os.Remove(shardPath)
 		return 0, 0, fmt.Errorf("duckdb copy: %w", err)
 	}
 	fi, err := os.Stat(shardPath)
@@ -198,7 +205,9 @@ FROM read_json('%s', format='newline_delimited', columns=%s,
 		return 0, 0, err
 	}
 	var rows int64
-	db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM read_parquet('%s')", esc(shardPath))).Scan(&rows)
+	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM read_parquet('%s')", esc(shardPath))).Scan(&rows); err != nil {
+		return 0, 0, fmt.Errorf("duckdb count rows: %w", err)
+	}
 	return rows, fi.Size(), nil
 }
 
