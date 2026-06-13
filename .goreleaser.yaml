@@ -1,0 +1,251 @@
+# GoReleaser turns one tag push into everything a user might install from: raw
+# archives, Linux packages (deb, rpm, apk), a multi-arch container image, and
+# entries for the package managers (Homebrew, Scoop). `git tag vX.Y.Z && git
+# push --tags` fans out to all of them through .github/workflows/release.yml.
+#
+# Publish steps that push to a repository we do not own yet (the Homebrew tap,
+# the Scoop bucket) self-disable when their token is absent. A release with no
+# extra secrets still produces every downloadable artifact and the container
+# image; each manager lights up the moment its repository and token exist.
+#
+# The released binary is the pure-Go build (CGO_ENABLED=0). The optional DuckDB
+# conversion engine needs cgo and is left to a local `make build-duckdb`.
+version: 2
+
+project_name: arctic
+
+before:
+  # Only fetch modules; never `go mod tidy` during a release, the tree is kept
+  # tidy in CI.
+  hooks:
+    - go mod download
+
+builds:
+  - id: arctic
+    binary: arctic
+    main: ./cmd/arctic
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/tamnd/arctic-cli/cli.Version={{ .Version }}
+      - -X github.com/tamnd/arctic-cli/cli.Commit={{ .ShortCommit }}
+      - -X github.com/tamnd/arctic-cli/cli.Date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    targets:
+      - linux_amd64
+      - linux_arm64
+      - linux_arm_7
+      - linux_386
+      - darwin_amd64
+      - darwin_arm64
+      - windows_amd64
+      - windows_arm64
+      - freebsd_amd64
+      - freebsd_arm64
+
+archives:
+  # tar.gz everywhere except a zip on Windows.
+  - id: default
+    name_template: "arctic_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+
+nfpms:
+  # One nfpm definition emits the deb, rpm, and apk for every Linux build.
+  # arctic is a user command, not a daemon, so there is no unit file and no
+  # postinstall: the package is the binary and its license.
+  - id: linux-packages
+    package_name: arctic
+    file_name_template: "{{ .ConventionalFileName }}"
+    vendor: tamnd
+    homepage: https://github.com/tamnd/arctic-cli
+    maintainer: Duc-Tam Nguyen <tamnd87@gmail.com>
+    description: A command line for the bulk Reddit archive.
+    license: Apache-2.0
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    section: utils
+    contents:
+      - src: ./LICENSE
+        dst: /usr/share/doc/arctic/LICENSE
+
+dockers_v2:
+  # One multi-platform image built with buildx. GoReleaser stages the prebuilt
+  # binaries under per-platform directories in the build context and the
+  # Dockerfile copies the right one through $TARGETPLATFORM.
+  - images:
+      - ghcr.io/tamnd/arctic
+    tags:
+      - "{{ .Version }}"
+      - latest
+    dockerfile: Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: "A command line for the bulk Reddit archive"
+      org.opencontainers.image.url: "https://github.com/tamnd/arctic-cli"
+      org.opencontainers.image.source: "https://github.com/tamnd/arctic-cli"
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: "Apache-2.0"
+
+homebrew_casks:
+  # Homebrew cask pushed to the tap repository. Self-disables until
+  # HOMEBREW_TAP_GITHUB_TOKEN (a PAT with write to tamnd/homebrew-tap) is set,
+  # so a tokenless release still writes the cask into dist for inspection.
+  - name: arctic
+    repository:
+      owner: tamnd
+      name: homebrew-tap
+      token: '{{ envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "" }}'
+    directory: Casks
+    homepage: https://github.com/tamnd/arctic-cli
+    description: A command line for the bulk Reddit archive
+    skip_upload: '{{ if envOrDefault "HOMEBREW_TAP_GITHUB_TOKEN" "" }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: Duc-Tam Nguyen
+      email: tamnd87@gmail.com
+
+scoops:
+  # Scoop manifest for Windows, pushed to the bucket repository.
+  - repository:
+      owner: tamnd
+      name: scoop-bucket
+      token: '{{ envOrDefault "SCOOP_BUCKET_GITHUB_TOKEN" "" }}'
+    homepage: https://github.com/tamnd/arctic-cli
+    description: A command line for the bulk Reddit archive
+    license: Apache-2.0
+    skip_upload: '{{ if envOrDefault "SCOOP_BUCKET_GITHUB_TOKEN" "" }}false{{ else }}true{{ end }}'
+    commit_author:
+      name: Duc-Tam Nguyen
+      email: tamnd87@gmail.com
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+sboms:
+  # A CycloneDX SBOM per archive via syft; the release workflow installs it.
+  - id: archive
+    artifacts: archive
+
+signs:
+  # Keyless cosign signature over the checksum file. It runs only on a real
+  # release in CI, where the workflow grants the OIDC token cosign needs.
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+docker_signs:
+  - cmd: cosign
+    artifacts: manifests
+    args:
+      - sign
+      - "${artifact}@${digest}"
+      - "--yes"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 999
+
+release:
+  github:
+    owner: tamnd
+    name: arctic-cli
+  draft: false
+  prerelease: auto
+  name_template: "arctic {{ .Tag }}"
+  header: |
+    A command line for the bulk Reddit archive. One static binary, no API key,
+    no account. It pulls the monthly RC_/RS_ dumps from the public torrent
+    catalog and the Arctic Shift backfill API, decompresses the zstd JSONL,
+    writes Parquet, keeps a local index, and can publish the shards to a Hugging
+    Face dataset. Reads as JSON, JSONL, CSV, TSV, or a table.
+
+    ### Install
+
+    Go:
+
+    ```sh
+    go install github.com/tamnd/arctic-cli/cmd/arctic@{{ .Tag }}
+    ```
+
+    Homebrew:
+
+    ```sh
+    brew install --cask tamnd/tap/arctic
+    ```
+
+    Scoop:
+
+    ```sh
+    scoop bucket add tamnd https://github.com/tamnd/scoop-bucket
+    scoop install arctic
+    ```
+
+    Container:
+
+    ```sh
+    docker run --rm ghcr.io/tamnd/arctic:{{ trimprefix .Tag "v" }} catalog
+    ```
+
+    Or download a prebuilt binary for your platform from the assets below.
+  footer: |
+    ### Verify
+
+    Every archive is listed in `checksums.txt`, which is signed with cosign
+    (keyless). Verify the checksum signature before trusting a download:
+
+    ```sh
+    cosign verify-blob checksums.txt \
+      --certificate checksums.txt.pem \
+      --signature checksums.txt.sig \
+      --certificate-identity-regexp 'https://github.com/tamnd/arctic-cli' \
+      --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+    ```
+
+    The container image and its SBOM are signed the same way.
+
+    ### Links
+
+    - Docs: https://arctic-cli.tamnd.com
+    - Source: https://github.com/tamnd/arctic-cli
+
+    Not affiliated with, endorsed by, or sponsored by Reddit, Inc. arctic moves
+    only public archive data from Academic Torrents and the Arctic Shift API.
