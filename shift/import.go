@@ -92,7 +92,7 @@ func scanFile(path string, count *int64, authors, subreddits map[string]struct{}
 		}
 		return fmt.Errorf("open %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64<<10), scanBufSize)

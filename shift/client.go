@@ -101,7 +101,7 @@ func (c *Client) get(ctx context.Context, path string, params url.Values) ([]byt
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			d := rateLimitWait(resp)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			retries++
 			if retries > maxRetries {
 				return nil, ErrBlocked
@@ -114,12 +114,12 @@ func (c *Client) get(ctx context.Context, path string, params url.Values) ([]byt
 
 		// 403 is the API saying no in a way retries will not fix.
 		if resp.StatusCode == http.StatusForbidden {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, ErrBlocked
 		}
 
 		if resp.StatusCode >= 500 {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			retries++
 			if retries > maxRetries {
 				return nil, fmt.Errorf("get %s: server returned %d", path, resp.StatusCode)
@@ -132,12 +132,12 @@ func (c *Client) get(ctx context.Context, path string, params url.Values) ([]byt
 
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return nil, fmt.Errorf("get %s: status %d: %s", path, resp.StatusCode, string(body))
 		}
 
 		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()

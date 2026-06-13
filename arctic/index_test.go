@@ -11,7 +11,7 @@ func TestIndexRecordAndStats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer idx.Close()
+	defer func() { _ = idx.Close() }()
 
 	if err := idx.RecordShard(TypeComments, 2011, 3, "", "/data/comments/2011/03/000.parquet", 500, 1024); err != nil {
 		t.Fatal(err)

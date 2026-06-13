@@ -89,7 +89,7 @@ func recordShards(cfg arctic.Config, t arctic.Type, year, month int, entity, dir
 	if err != nil {
 		return err
 	}
-	defer idx.Close()
+	defer func() { _ = idx.Close() }()
 	for _, path := range paths {
 		records, size, ferr := shardFooter(path)
 		if ferr != nil {
@@ -108,7 +108,7 @@ func shardFooter(path string) (records, size int64, err error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
 	if err != nil {
 		return 0, 0, err

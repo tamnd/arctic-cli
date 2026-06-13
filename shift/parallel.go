@@ -54,7 +54,7 @@ func (c *Client) FetchRange(ctx context.Context, kind, name string, t arctic.Typ
 	if err != nil {
 		return 0, fmt.Errorf("temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	// counts[i] is the records written for bucket i; files[i] is its temp path.
 	files := make([]string, len(buckets))
@@ -77,11 +77,14 @@ func (c *Client) FetchRange(ctx context.Context, kind, name string, t arctic.Typ
 			if err != nil {
 				return fmt.Errorf("create bucket %s: %w", b.label, err)
 			}
-			defer f.Close()
 
 			n, err := c.fetch(gctx, kind, name, t, b.after, b.before, f, nil)
 			if err != nil {
+				_ = f.Close()
 				return fmt.Errorf("bucket %s: %w", b.label, err)
+			}
+			if err := f.Close(); err != nil {
+				return fmt.Errorf("close bucket %s: %w", b.label, err)
 			}
 			counts[i] = n
 
@@ -111,10 +114,10 @@ func (c *Client) FetchRange(ctx context.Context, kind, name string, t arctic.Typ
 			return written, fmt.Errorf("reopen bucket: %w", err)
 		}
 		if _, err := io.Copy(out, f); err != nil {
-			f.Close()
+			_ = f.Close()
 			return written, fmt.Errorf("concat bucket: %w", err)
 		}
-		f.Close()
+		_ = f.Close()
 		written += counts[i]
 	}
 

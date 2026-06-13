@@ -87,7 +87,7 @@ func processFile(ctx context.Context, cfg Config, zstPath string, t Type, pathFn
 	}
 	dec, err := zstd.NewReader(f, zstd.WithDecoderMaxWindow(1<<31))
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		zstdDecoderSem.Unlock()
 		return ProcessResult{}, fmt.Errorf("zstd reader: %w", err)
 	}
@@ -144,11 +144,12 @@ func processFile(ctx context.Context, cfg Config, zstPath string, t Type, pathFn
 
 	var loopErr error
 	chunkCount := 0
+scan:
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
 			loopErr = ctx.Err()
-			break
+			break scan
 		default:
 		}
 		line := scanner.Bytes()
@@ -194,7 +195,7 @@ func processFile(ctx context.Context, cfg Config, zstPath string, t Type, pathFn
 	// Free the 2 GB window before flushing the final shard so the heap is back
 	// down while the parquet writer runs.
 	dec.Close()
-	f.Close()
+	_ = f.Close()
 	runtime.GC()
 	debug.FreeOSMemory()
 	zstdDecoderSem.Unlock()
@@ -219,7 +220,7 @@ func ValidateParquet(path string) error {
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
 	if err != nil {

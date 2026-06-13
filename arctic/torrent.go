@@ -143,7 +143,7 @@ func DownloadFile(ctx context.Context, infoHash, pathInTorrent, destPath string,
 		err := downloadAttempt(ctx, infoHash, pathInTorrent, destPath, trackers, stall, start, cb)
 		if err == nil {
 			if verr := QuickValidateZst(destPath); verr != nil {
-				os.Remove(destPath)
+				_ = os.Remove(destPath)
 				return &ErrCorruption{Msg: fmt.Sprintf("validate %s: %v", filepath.Base(destPath), verr)}
 			}
 			if cb != nil {
@@ -314,7 +314,7 @@ func DownloadMonth(ctx context.Context, cfg Config, m Month, t Type, cb Download
 		if QuickValidateZst(dest) == nil {
 			return dest, nil // already have a good copy
 		}
-		os.Remove(dest)
+		_ = os.Remove(dest)
 	}
 	pathInTorrent := FilePathInTorrent(m, t)
 	if err := DownloadFile(ctx, infoHash, pathInTorrent, dest, arcticTrackers, cb); err != nil {
@@ -332,7 +332,7 @@ func DownloadSubreddit(ctx context.Context, destDir, name string, t Type, cb Dow
 		if QuickValidateZst(dest) == nil {
 			return dest, nil
 		}
-		os.Remove(dest)
+		_ = os.Remove(dest)
 	}
 	if err := DownloadFile(ctx, SubredditTorrentInfoHash, pathInTorrent, dest, arcticTrackers, cb); err != nil {
 		return "", err
@@ -368,7 +368,7 @@ func subredditPresence(ctx context.Context) (map[string]struct{}, error) {
 			subredditPresenceErr = err
 			return
 		}
-		defer os.RemoveAll(dir)
+		defer func() { _ = os.RemoveAll(dir) }()
 		files, err := torrentFileList(ctx, SubredditTorrentInfoHash, dir, 5*time.Minute)
 		if err != nil {
 			subredditPresenceErr = err
@@ -435,7 +435,7 @@ func FetchZstSizes(ctx context.Context, cfg Config) (map[string]int64, error) {
 			return nil, err
 		}
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	collect := func(infoHash string, timeout time.Duration) {
 		sub := filepath.Join(dir, infoHash)
@@ -534,7 +534,7 @@ func QuickValidateZst(path string) error {
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
 	if err != nil {

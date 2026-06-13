@@ -56,7 +56,7 @@ func fakeAPI(t *testing.T, all []record) *httptest.Server {
 			b, _ := json.Marshal(rec)
 			raw = append(raw, b)
 		}
-		json.NewEncoder(w).Encode(map[string]any{"data": raw})
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": raw})
 	}))
 }
 
@@ -236,7 +236,7 @@ func TestGetBlockedOnForbidden(t *testing.T) {
 
 func TestGetMinDate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"data":"2010-05-01T00:00:00Z"}`)
+		_, _ = fmt.Fprint(w, `{"data":"2010-05-01T00:00:00Z"}`)
 	}))
 	defer srv.Close()
 
@@ -252,7 +252,7 @@ func TestGetMinDate(t *testing.T) {
 
 func TestGetMinDateClamps(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"data":"2001-01-01T00:00:00Z"}`)
+		_, _ = fmt.Fprint(w, `{"data":"2001-01-01T00:00:00Z"}`)
 	}))
 	defer srv.Close()
 

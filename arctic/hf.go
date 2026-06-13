@@ -98,7 +98,7 @@ func (c *HFClient) do(req *http.Request) (*http.Response, []byte, error) {
 		return nil, nil, classifyNet(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp, body, nil
 }
 
@@ -313,7 +313,7 @@ func doRaw(client *http.Client, req *http.Request) (*http.Response, []byte, erro
 		return nil, nil, err
 	}
 	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp, body, nil
 }
 
@@ -329,35 +329,43 @@ func (c *HFClient) postCommit(ctx context.Context, files []preparedFile) error {
 			"summary": "arctic shard commit",
 		},
 	}
-	enc.Encode(header)
+	if err := enc.Encode(header); err != nil {
+		return fmt.Errorf("encode commit header: %w", err)
+	}
 
 	for _, f := range files {
 		if f.op.Delete {
-			enc.Encode(map[string]any{
+			if err := enc.Encode(map[string]any{
 				"key":   "deletedFile",
 				"value": map[string]any{"path": f.op.PathInRepo},
-			})
+			}); err != nil {
+				return fmt.Errorf("encode deleted file: %w", err)
+			}
 			continue
 		}
 		if f.useLFS {
-			enc.Encode(map[string]any{
+			if err := enc.Encode(map[string]any{
 				"key": "lfsFile",
 				"value": map[string]any{
 					"path": f.op.PathInRepo,
 					"oid":  f.oid,
 					"size": f.size,
 				},
-			})
+			}); err != nil {
+				return fmt.Errorf("encode lfs file: %w", err)
+			}
 			continue
 		}
-		enc.Encode(map[string]any{
+		if err := enc.Encode(map[string]any{
 			"key": "file",
 			"value": map[string]any{
 				"path":     f.op.PathInRepo,
 				"content":  base64.StdEncoding.EncodeToString(f.data),
 				"encoding": "base64",
 			},
-		})
+		}); err != nil {
+			return fmt.Errorf("encode file: %w", err)
+		}
 	}
 
 	url := fmt.Sprintf("%s/api/datasets/%s/commit/main", hfEndpoint, c.Repo)
