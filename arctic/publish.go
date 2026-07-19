@@ -49,7 +49,7 @@ func Publish(ctx context.Context, cfg Config, opts PublishOptions, cb func(strin
 	}
 
 	hw := DetectHardware(cfg.WorkDir)
-	budget := ComputeBudget(hw)
+	budget := applyBudgetOverrides(ComputeBudget(hw), cfg)
 	cb(fmt.Sprintf("hardware: %s", hw))
 	cb(fmt.Sprintf("budget: %s", budget))
 
@@ -113,6 +113,7 @@ func Publish(ctx context.Context, cfg Config, opts PublishOptions, cb func(strin
 	if hf != nil {
 		p.upload = hf.UploadFiles
 	}
+	p.diskFreeGB = detectDiskFreeGB
 	p.markProgress()
 
 	if budget.Sequential {
@@ -150,6 +151,9 @@ type publisher struct {
 
 	progressMu sync.Mutex
 	progress   map[string]ShardProgress // in-flight month progress, keyed like the ledger
+
+	diskFreeGB func(string) float64 // free-disk probe, swappable in tests
+	diskPoll   time.Duration        // how often the download gate rechecks disk (0 = default)
 }
 
 // markProgress records that the pipeline moved forward, resetting the stall
@@ -158,6 +162,42 @@ type publisher struct {
 // watchdog would cancel a healthy long-running month before it ever commits.
 func (p *publisher) markProgress() {
 	p.lastCommit.Store(time.Now().UnixNano())
+}
+
+// waitForDisk holds back a download while free disk sits below the floor, so the
+// pipeline processes several months in parallel without staging more .zst files
+// than the disk can hold. A deliberate wait is not a stall, so it keeps the
+// watchdog clock fresh. It returns only when there is room or the context ends.
+func (p *publisher) waitForDisk(ctx context.Context) error {
+	floor := float64(p.cfg.DownloadFloorGB)
+	if floor <= 0 {
+		return nil
+	}
+	free := p.diskFreeGB
+	if free == nil {
+		free = detectDiskFreeGB
+	}
+	poll := p.diskPoll
+	if poll <= 0 {
+		poll = 20 * time.Second
+	}
+	warned := false
+	for {
+		gb := free(p.cfg.WorkDir)
+		if gb <= 0 || gb >= floor { // gb <= 0: probe unsure, do not block
+			return nil
+		}
+		if !warned {
+			p.cb(fmt.Sprintf("disk %.0f GB below %d GB floor, holding new downloads", gb, p.cfg.DownloadFloorGB))
+			warned = true
+		}
+		p.markProgress()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
 }
 
 // runSequential takes each job fully through download, process, commit, ledger,
@@ -217,6 +257,9 @@ func (p *publisher) runPipeline(ctx context.Context, jobs []publishJob) error {
 			for job := range downloadCh {
 				if gctx.Err() != nil {
 					continue
+				}
+				if err := p.waitForDisk(gctx); err != nil {
+					continue // context cancelled; drain the queue
 				}
 				if err := p.download(gctx, job); err != nil {
 					p.cb(fmt.Sprintf("skip %s %s: download failed: %v", job.Month, job.Type, err))
