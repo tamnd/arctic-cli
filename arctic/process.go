@@ -33,6 +33,29 @@ type ProcessResult struct {
 // under outDir.
 type ShardPathFunc func(n int) string
 
+// ShardDone reports a shard the processor just finished writing. The publish
+// path uses it to commit shards to the hub as they land instead of waiting for
+// the whole month.
+type ShardDone struct {
+	N       int    // absolute shard index within the month
+	Path    string // where the shard was written
+	Records int64  // rows in this shard
+	Bytes   int64  // Parquet size on disk
+}
+
+// ProcessConfig tunes a streaming process run.
+type ProcessConfig struct {
+	// StartShard skips emitting shards with an index below it. A resumed month
+	// whose earlier shards are already committed fast-forwards past them without
+	// rewriting or re-uploading.
+	StartShard int
+	// OnProgress, when set, reports the running count of decoded lines.
+	OnProgress func(done int64)
+	// OnShard, when set, is called after each shard at or above StartShard is
+	// written and validated. Returning an error aborts the file.
+	OnShard func(ShardDone) error
+}
+
 // ProcessFile decodes the .zst at zstPath, parses each line into the type's
 // struct, groups lines into chunks of cfg.ChunkLines, and writes one Parquet
 // shard per chunk. Unparseable lines are counted and skipped, never fatal. The
@@ -42,7 +65,7 @@ func ProcessFile(ctx context.Context, cfg Config, zstPath string, t Type, outDir
 
 	return processFile(ctx, cfg, zstPath, t, func(n int) string {
 		return filepath.Join(outDir, fmt.Sprintf("%03d.parquet", n))
-	}, outDir, cb)
+	}, outDir, ProcessConfig{OnProgress: cb})
 }
 
 // ProcessFileTo is like ProcessFile but names shards through pathFn, which the
@@ -51,11 +74,21 @@ func ProcessFile(ctx context.Context, cfg Config, zstPath string, t Type, outDir
 func ProcessFileTo(ctx context.Context, cfg Config, zstPath string, t Type, pathFn ShardPathFunc,
 	cb func(done int64)) (ProcessResult, error) {
 
-	return processFile(ctx, cfg, zstPath, t, pathFn, "", cb)
+	return processFile(ctx, cfg, zstPath, t, pathFn, "", ProcessConfig{OnProgress: cb})
+}
+
+// ProcessFileStream is ProcessFileTo with per-shard callbacks and mid-month
+// resume, so a caller can commit shards as they are produced and pick up after
+// an interrupted run. The returned ProcessResult counts only the shards this
+// call produced (those at or above pc.StartShard).
+func ProcessFileStream(ctx context.Context, cfg Config, zstPath string, t Type, pathFn ShardPathFunc,
+	pc ProcessConfig) (ProcessResult, error) {
+
+	return processFile(ctx, cfg, zstPath, t, pathFn, "", pc)
 }
 
 func processFile(ctx context.Context, cfg Config, zstPath string, t Type, pathFn ShardPathFunc,
-	outDir string, cb func(done int64)) (ProcessResult, error) {
+	outDir string, pc ProcessConfig) (ProcessResult, error) {
 
 	if !t.Valid() {
 		return ProcessResult{}, fmt.Errorf("unknown type %q", t)
@@ -64,7 +97,7 @@ func processFile(ctx context.Context, cfg Config, zstPath string, t Type, pathFn
 		if !HasDuckDB {
 			return ProcessResult{}, fmt.Errorf("duckdb engine requested but this binary was not built with -tags duckdb")
 		}
-		return processDuckDB(ctx, cfg, zstPath, t, pathFn, cb)
+		return processDuckDB(ctx, cfg, zstPath, t, pathFn, pc)
 	}
 
 	chunkLines := cfg.ChunkLines
@@ -95,18 +128,20 @@ func processFile(ctx context.Context, cfg Config, zstPath string, t Type, pathFn
 	var res ProcessResult
 	shardN := 0
 
-	// flush writes the current chunk as a shard and resets the buffer.
+	// flush writes the buffered chunk as shard shardN. When shardN is below
+	// pc.StartShard the shard is already committed from an earlier run, so it
+	// fast-forwards past the chunk (which was never buffered) without writing.
 	var comments []Comment
 	var submissions []Submission
 
-	flush := func() error {
-		var rowCount int
-		if t == TypeComments {
-			rowCount = len(comments)
-		} else {
-			rowCount = len(submissions)
-		}
+	flush := func(rowCount int) error {
 		if rowCount == 0 {
+			return nil
+		}
+		if shardN < pc.StartShard {
+			comments = comments[:0]
+			submissions = submissions[:0]
+			shardN++
 			return nil
 		}
 		shardPath := pathFn(shardN)
@@ -128,6 +163,11 @@ func processFile(ctx context.Context, cfg Config, zstPath string, t Type, pathFn
 		res.Shards++
 		res.Records += int64(rowCount)
 		res.Bytes += size
+		if pc.OnShard != nil {
+			if err := pc.OnShard(ShardDone{N: shardN, Path: shardPath, Records: int64(rowCount), Bytes: size}); err != nil {
+				return err
+			}
+		}
 		shardN++
 		return nil
 	}
@@ -154,20 +194,25 @@ scan:
 		}
 		line := scanner.Bytes()
 		lineCount++
-		if cb != nil && lineCount%200000 == 0 {
-			cb(lineCount)
+		if pc.OnProgress != nil && lineCount%200000 == 0 {
+			pc.OnProgress(lineCount)
 		}
 		if len(line) == 0 || line[0] != '{' {
 			res.SkippedLines++
 			continue
 		}
+		// While fast-forwarding past already-committed shards, parse to keep the
+		// chunk boundaries identical but do not buffer the rows.
+		buffering := shardN >= pc.StartShard
 		if t == TypeComments {
 			c, ok := CommentFromJSON(line)
 			if !ok {
 				res.SkippedLines++
 				continue
 			}
-			comments = append(comments, c)
+			if buffering {
+				comments = append(comments, c)
+			}
 			chunkCount++
 		} else {
 			s, ok := SubmissionFromJSON(line)
@@ -175,11 +220,13 @@ scan:
 				res.SkippedLines++
 				continue
 			}
-			submissions = append(submissions, s)
+			if buffering {
+				submissions = append(submissions, s)
+			}
 			chunkCount++
 		}
 		if chunkCount >= chunkLines {
-			if err := flush(); err != nil {
+			if err := flush(chunkCount); err != nil {
 				loopErr = err
 				break
 			}
@@ -203,11 +250,11 @@ scan:
 	if loopErr != nil {
 		return res, loopErr
 	}
-	if err := flush(); err != nil {
+	if err := flush(chunkCount); err != nil {
 		return res, err
 	}
-	if cb != nil {
-		cb(lineCount)
+	if pc.OnProgress != nil {
+		pc.OnProgress(lineCount)
 	}
 	return res, nil
 }

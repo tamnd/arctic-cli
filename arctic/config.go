@@ -37,6 +37,10 @@ type Config struct {
 	Engine Engine
 	// ChunkLines is the number of JSONL lines per Parquet shard.
 	ChunkLines int
+	// CommitEveryShards commits to the hub every N shards within a month so a
+	// big month lands incrementally and a restart resumes mid-month. Zero
+	// commits the whole month in one go at the end.
+	CommitEveryShards int
 	// DuckDBMemoryMB caps the DuckDB engine's memory.
 	DuckDBMemoryMB int
 
@@ -61,11 +65,15 @@ const (
 	EnvRepoRoot       = "ARCTIC_REPO_ROOT"
 	EnvMinFreeGB      = "ARCTIC_MIN_FREE_GB"
 	EnvChunkLines     = "ARCTIC_CHUNK_LINES"
+	EnvCommitEvery    = "ARCTIC_COMMIT_EVERY"
 	EnvEngine         = "ARCTIC_ENGINE"
 	EnvHFToken        = "HF_TOKEN"
 	DefaultHFRepo     = "open-index/arctic"
 	DefaultChunkLines = 500000
-	DefaultMinFreeGB  = 30
+	// DefaultCommitEveryShards keeps a big month landing every few shards
+	// instead of one commit at the end, so progress is visible and resumable.
+	DefaultCommitEveryShards = 8
+	DefaultMinFreeGB         = 30
 )
 
 // DefaultDataDir returns the XDG data directory for arctic, honoring
@@ -90,21 +98,25 @@ func DefaultDataDir() string {
 func DefaultConfig() Config {
 	data := DefaultDataDir()
 	c := Config{
-		DataDir:        data,
-		RawDir:         envOr(EnvRawDir, filepath.Join(data, "raw")),
-		WorkDir:        envOr(EnvWorkDir, filepath.Join(data, "work")),
-		RepoRoot:       envOr(EnvRepoRoot, filepath.Join(data, "repo")),
-		HFRepo:         DefaultHFRepo,
-		Engine:         DefaultEngine(),
-		ChunkLines:     DefaultChunkLines,
-		MinFreeGB:      DefaultMinFreeGB,
-		MaxCommitStall: 45 * time.Minute,
+		DataDir:           data,
+		RawDir:            envOr(EnvRawDir, filepath.Join(data, "raw")),
+		WorkDir:           envOr(EnvWorkDir, filepath.Join(data, "work")),
+		RepoRoot:          envOr(EnvRepoRoot, filepath.Join(data, "repo")),
+		HFRepo:            DefaultHFRepo,
+		Engine:            DefaultEngine(),
+		ChunkLines:        DefaultChunkLines,
+		CommitEveryShards: DefaultCommitEveryShards,
+		MinFreeGB:         DefaultMinFreeGB,
+		MaxCommitStall:    45 * time.Minute,
 	}
 	if v := os.Getenv(EnvEngine); v != "" {
 		c.Engine = Engine(v)
 	}
 	if n := envInt(EnvChunkLines); n > 0 {
 		c.ChunkLines = n
+	}
+	if n := envInt(EnvCommitEvery); n > 0 {
+		c.CommitEveryShards = n
 	}
 	if n := envInt(EnvMinFreeGB); n > 0 {
 		c.MinFreeGB = n
