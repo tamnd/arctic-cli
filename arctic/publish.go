@@ -13,11 +13,12 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// ErrCommitStall is returned when no Hugging Face commit makes progress within
-// cfg.MaxCommitStall. The publish leaves the in-flight month uncommitted so a
-// supervisor that restarts the process resumes cleanly, and the CLI maps this to
-// exit code 75 (EX_TEMPFAIL).
-var ErrCommitStall = errors.New("arctic: commit stall, no hugging face commit within max-commit-stall")
+// ErrCommitStall is returned when the pipeline makes no forward progress within
+// cfg.MaxCommitStall: neither a processed shard nor a Hugging Face commit. The
+// publish leaves the in-flight month uncommitted so a supervisor that restarts
+// the process resumes cleanly, and the CLI maps this to exit code 75
+// (EX_TEMPFAIL).
+var ErrCommitStall = errors.New("arctic: commit stall, no forward progress within max-commit-stall")
 
 // PublishOptions configures a publish run.
 type PublishOptions struct {
@@ -100,7 +101,7 @@ func Publish(ctx context.Context, cfg Config, opts PublishOptions, cb func(strin
 		statsPath: statsPath,
 		cb:        cb,
 	}
-	p.lastCommit.Store(time.Now().UnixNano())
+	p.markProgress()
 
 	if budget.Sequential {
 		return p.runSequential(ctx, jobs)
@@ -129,8 +130,16 @@ type publisher struct {
 
 	statsMu    sync.Mutex
 	commitMu   sync.Mutex
-	lastCommit atomic.Int64 // unix nanos of the last successful commit
+	lastCommit atomic.Int64 // unix nanos of the last forward progress (processed shard or commit)
 	stalled    atomic.Bool
+}
+
+// markProgress records that the pipeline moved forward, resetting the stall
+// clock. A month can take longer to process than MaxCommitStall, so processing
+// a shard counts as progress just like a completed commit; otherwise the
+// watchdog would cancel a healthy long-running month before it ever commits.
+func (p *publisher) markProgress() {
+	p.lastCommit.Store(time.Now().UnixNano())
 }
 
 // runSequential takes each job fully through download, process, commit, ledger,
@@ -297,7 +306,9 @@ func (p *publisher) process(ctx context.Context, job *publishJob) error {
 	pathFn := func(n int) string {
 		return filepath.Join(p.cfg.RepoRoot, ShardHFPath(job.Type, job.Month, n))
 	}
-	res, err := ProcessFileTo(ctx, p.cfg, job.zstPath, job.Type, pathFn, nil)
+	res, err := ProcessFileTo(ctx, p.cfg, job.zstPath, job.Type, pathFn, func(int64) {
+		p.markProgress()
+	})
 	if err != nil {
 		return err
 	}
@@ -318,7 +329,7 @@ func (p *publisher) commit(ctx context.Context, job *publishJob) error {
 		if err != nil {
 			return err
 		}
-		p.lastCommit.Store(time.Now().UnixNano())
+		p.markProgress()
 	}
 
 	job.durComm = time.Since(start)
@@ -393,7 +404,7 @@ func (p *publisher) recordAndREADME(ctx context.Context, job *publishJob) error 
 		if err != nil {
 			return err
 		}
-		p.lastCommit.Store(time.Now().UnixNano())
+		p.markProgress()
 	}
 	return nil
 }
@@ -406,11 +417,24 @@ func (p *publisher) cleanup(job *publishJob) {
 	_ = os.RemoveAll(dir)
 }
 
-// watchStall cancels the run when no commit has progressed within
-// cfg.MaxCommitStall, which surfaces as ErrCommitStall.
-func (p *publisher) watchStall(ctx context.Context, cancel context.CancelFunc) {
+// idleSince reports how long the pipeline has gone without forward progress.
+func (p *publisher) idleSince() time.Duration {
+	return time.Since(time.Unix(0, p.lastCommit.Load()))
+}
+
+// stalledOut reports whether the idle time has crossed cfg.MaxCommitStall. A
+// non-positive MaxCommitStall disables the watchdog.
+func (p *publisher) stalledOut() bool {
 	maxStall := p.cfg.MaxCommitStall
-	if maxStall <= 0 {
+	return maxStall > 0 && p.idleSince() > maxStall
+}
+
+// watchStall cancels the run when the pipeline makes no forward progress within
+// cfg.MaxCommitStall, which surfaces as ErrCommitStall. Processing a shard
+// counts as progress, so a long month does not trip the watchdog before it can
+// commit; only a genuine wedge does.
+func (p *publisher) watchStall(ctx context.Context, cancel context.CancelFunc) {
+	if p.cfg.MaxCommitStall <= 0 {
 		return
 	}
 	ticker := time.NewTicker(time.Minute)
@@ -420,9 +444,8 @@ func (p *publisher) watchStall(ctx context.Context, cancel context.CancelFunc) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			idle := time.Since(time.Unix(0, p.lastCommit.Load()))
-			if idle > maxStall {
-				p.cb(fmt.Sprintf("commit stall: no progress for %s, restarting", idle.Round(time.Second)))
+			if p.stalledOut() {
+				p.cb(fmt.Sprintf("commit stall: no progress for %s, restarting", p.idleSince().Round(time.Second)))
 				p.stalled.Store(true)
 				cancel()
 				return
