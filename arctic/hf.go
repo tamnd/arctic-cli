@@ -102,17 +102,27 @@ func (c *HFClient) do(req *http.Request) (*http.Response, []byte, error) {
 	return resp, body, nil
 }
 
+// createRepoPayload builds the /api/repos/create body for repo. The API rejects
+// a slash in name, so a "namespace/name" repo is split into organization and
+// bare name; a plain name (no namespace) is sent as is and lands under the
+// token's own account.
+func createRepoPayload(repo string, private bool) map[string]any {
+	payload := map[string]any{
+		"type":    "dataset",
+		"name":    repo,
+		"private": private,
+	}
+	if ns, name, ok := strings.Cut(repo, "/"); ok {
+		payload["organization"] = ns
+		payload["name"] = name
+	}
+	return payload
+}
+
 // CreateDatasetRepo creates the dataset repo, treating an "already exists"
 // response as success so the call is idempotent.
 func (c *HFClient) CreateDatasetRepo(ctx context.Context, private bool) error {
-	payload := map[string]any{
-		"type":    "dataset",
-		"name":    c.Repo,
-		"private": private,
-	}
-	// The API wants name and organization split, but it also accepts the full
-	// "namespace/name" in name, which is simpler here.
-	b, _ := json.Marshal(payload)
+	b, _ := json.Marshal(createRepoPayload(c.Repo, private))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		hfEndpoint+"/api/repos/create", bytes.NewReader(b))
 	if err != nil {
