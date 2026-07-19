@@ -96,6 +96,25 @@ func ComputeBudget(hw HardwareProfile) Budget {
 	return b
 }
 
+// applyBudgetOverrides lets Config pin the concurrency knobs above or below the
+// hardware-derived budget. A positive override wins; zero keeps the computed
+// value. Raising process concurrency also leaves sequential mode.
+func applyBudgetOverrides(b Budget, cfg Config) Budget {
+	if cfg.MaxDownloads > 0 {
+		b.MaxDownloads = cfg.MaxDownloads
+	}
+	if cfg.MaxProcess > 0 {
+		b.MaxProcess = cfg.MaxProcess
+	}
+	if cfg.MaxConvertWorkers > 0 {
+		b.MaxConvertWorkers = cfg.MaxConvertWorkers
+	}
+	if b.MaxProcess > 1 {
+		b.Sequential = false
+	}
+	return b
+}
+
 // String renders the budget for arctic info.
 func (b Budget) String() string {
 	if b.Sequential {

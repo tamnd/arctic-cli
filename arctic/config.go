@@ -46,6 +46,10 @@ type Config struct {
 
 	// MinFreeGB is the free-disk floor a publish refuses to start below.
 	MinFreeGB int
+	// DownloadFloorGB holds back starting a new month's download while free
+	// disk is below this, so months process in parallel without the pipeline
+	// piling up more .zst files than the disk can hold. Zero disables the gate.
+	DownloadFloorGB int
 	// MaxCommitStall is how long a Hugging Face commit may make no progress
 	// before the publish exits with the restart code.
 	MaxCommitStall time.Duration
@@ -66,6 +70,10 @@ const (
 	EnvMinFreeGB      = "ARCTIC_MIN_FREE_GB"
 	EnvChunkLines     = "ARCTIC_CHUNK_LINES"
 	EnvCommitEvery    = "ARCTIC_COMMIT_EVERY"
+	EnvDownloadFloor  = "ARCTIC_DOWNLOAD_FLOOR_GB"
+	EnvMaxDownloads   = "ARCTIC_MAX_DOWNLOADS"
+	EnvMaxProcess     = "ARCTIC_MAX_PROCESS"
+	EnvMaxConvert     = "ARCTIC_MAX_CONVERT"
 	EnvEngine         = "ARCTIC_ENGINE"
 	EnvHFToken        = "HF_TOKEN"
 	DefaultHFRepo     = "open-index/arctic"
@@ -74,6 +82,9 @@ const (
 	// instead of one commit at the end, so progress is visible and resumable.
 	DefaultCommitEveryShards = 8
 	DefaultMinFreeGB         = 30
+	// DefaultDownloadFloorGB leaves room for a few in-flight months at once so
+	// the pipeline can process them in parallel without exhausting the disk.
+	DefaultDownloadFloorGB = 40
 )
 
 // DefaultDataDir returns the XDG data directory for arctic, honoring
@@ -107,6 +118,7 @@ func DefaultConfig() Config {
 		ChunkLines:        DefaultChunkLines,
 		CommitEveryShards: DefaultCommitEveryShards,
 		MinFreeGB:         DefaultMinFreeGB,
+		DownloadFloorGB:   DefaultDownloadFloorGB,
 		MaxCommitStall:    45 * time.Minute,
 	}
 	if v := os.Getenv(EnvEngine); v != "" {
@@ -120,6 +132,18 @@ func DefaultConfig() Config {
 	}
 	if n := envInt(EnvMinFreeGB); n > 0 {
 		c.MinFreeGB = n
+	}
+	if n := envInt(EnvDownloadFloor); n > 0 {
+		c.DownloadFloorGB = n
+	}
+	if n := envInt(EnvMaxDownloads); n > 0 {
+		c.MaxDownloads = n
+	}
+	if n := envInt(EnvMaxProcess); n > 0 {
+		c.MaxProcess = n
+	}
+	if n := envInt(EnvMaxConvert); n > 0 {
+		c.MaxConvertWorkers = n
 	}
 	return c
 }
