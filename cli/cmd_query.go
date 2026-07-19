@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"fmt"
+	"net/http"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/parquet-go/parquet-go"
@@ -147,6 +149,7 @@ func (a *App) catalogCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&sizes, "sizes", false, "fetch per-file sizes from the catalog (network)")
+	cmd.AddCommand(a.catalogRefreshCmd())
 	return cmd
 }
 
@@ -155,6 +158,64 @@ type catalogRow struct {
 	InBundle         bool   `json:"in_bundle"`
 	CommentsBytes    int64  `json:"comments_bytes,omitempty"`
 	SubmissionsBytes int64  `json:"submissions_bytes,omitempty"`
+}
+
+// catalogRefreshCmd fetches the newest monthly dumps from the arctic_shift
+// releases and caches any that the compiled-in catalog does not already know, so
+// the CLI keeps resolving new months without a rebuild.
+func (a *App) catalogRefreshCmd() *cobra.Command {
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "refresh",
+		Short: "Fetch newly published monthly dumps and cache their torrent hashes",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client := &http.Client{Timeout: a.timeout}
+			fetched, err := arctic.FetchMonthlyHashes(cmd.Context(), client)
+			if err != nil {
+				return mapErr(err)
+			}
+			path := arctic.MonthlyCachePath(a.cfg)
+			cached, _ := arctic.LoadMonthlyCache(path)
+
+			merged := make(map[string]string, len(cached)+len(fetched))
+			for k, v := range cached {
+				merged[k] = v
+			}
+			var rows []refreshRow
+			var added int
+			months := make([]string, 0, len(fetched))
+			for ym := range fetched {
+				months = append(months, ym)
+			}
+			sort.Strings(months)
+			for _, ym := range months {
+				h := fetched[ym]
+				state := "known"
+				if !arctic.BuiltinMonthly(ym) && cached[ym] == "" {
+					state = "new"
+					added++
+				}
+				merged[ym] = h
+				rows = append(rows, refreshRow{Month: ym, InfoHash: h, State: state})
+			}
+
+			if !dryRun && added > 0 {
+				if err := arctic.SaveMonthlyCache(path, merged); err != nil {
+					return codeError(exitError, err)
+				}
+			}
+			a.progressf("catalog refresh: %d months from releases, %d new", len(fetched), added)
+			return a.render(rows)
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report new months without writing the cache")
+	return cmd
+}
+
+type refreshRow struct {
+	Month    string `json:"month"`
+	InfoHash string `json:"info_hash"`
+	State    string `json:"state"`
 }
 
 // ---- stats -------------------------------------------------------------------

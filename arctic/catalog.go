@@ -77,6 +77,45 @@ var monthlyInfoHashes = map[string]string{
 	"2026-06": "3bac8bd352bbb74bbb23df4273cf3da5d66ee5a5",
 }
 
+// monthlyOverride holds month hashes learned at runtime from `catalog refresh`,
+// layered over the compiled-in map so a binary can resolve months published
+// after it was built. A refreshed entry wins over a built-in for the same month.
+// It is written once during CLI setup, before any concurrent resolves begin.
+var monthlyOverride = map[string]string{}
+
+// RegisterMonthlyHashes merges refreshed month to info-hash pairs into the
+// runtime override. Malformed months or hashes are ignored so a bad cache can
+// never poison resolution.
+func RegisterMonthlyHashes(m map[string]string) {
+	for ym, h := range m {
+		if _, err := ParseMonth(ym); err != nil {
+			continue
+		}
+		if len(h) != 40 {
+			continue
+		}
+		monthlyOverride[ym] = h
+	}
+}
+
+// monthlyHash resolves a month's info hash, preferring a refreshed override over
+// the compiled-in map.
+func monthlyHash(ym string) (string, bool) {
+	if h, ok := monthlyOverride[ym]; ok {
+		return h, true
+	}
+	h, ok := monthlyInfoHashes[ym]
+	return h, ok
+}
+
+// BuiltinMonthly reports whether the compiled-in catalog already carries a
+// month, ignoring the runtime override. `catalog refresh` uses it to flag which
+// fetched months are genuinely new.
+func BuiltinMonthly(ym string) bool {
+	_, ok := monthlyInfoHashes[ym]
+	return ok
+}
+
 // Per-subreddit bundle: the top forty thousand communities repackaged by
 // subreddit over 2005-06 .. 2023-12, files at
 // reddit/subreddits23/{name}_{comments,submissions}.zst.
@@ -134,11 +173,16 @@ func CatalogStart() Month { return Month{Year: catalogStartYear, Month: catalogS
 // end and the newest monthly torrent in the map.
 func CatalogEnd() Month {
 	end := Month{Year: bundleLastYear, Month: bundleLastMonth}
-	for ym := range monthlyInfoHashes {
-		m, err := ParseMonth(ym)
-		if err == nil && m.After(end) {
+	advance := func(ym string) {
+		if m, err := ParseMonth(ym); err == nil && m.After(end) {
 			end = m
 		}
+	}
+	for ym := range monthlyInfoHashes {
+		advance(ym)
+	}
+	for ym := range monthlyOverride {
+		advance(ym)
 	}
 	return end
 }
@@ -170,7 +214,7 @@ func InfoHashFor(m Month) (string, error) {
 	if m.Before(CatalogStart()) {
 		return "", fmt.Errorf("%s is before the catalog starts (%s)", m, CatalogStart())
 	}
-	h, ok := monthlyInfoHashes[m.String()]
+	h, ok := monthlyHash(m.String())
 	if !ok {
 		return "", &ErrNotPublished{Month: m}
 	}
@@ -202,8 +246,15 @@ func SubredditFilePathInTorrent(name string, t Type) string {
 // KnownMonthlyHashes returns the monthly "YYYY-MM" keys in sorted order, for
 // catalog listings.
 func KnownMonthlyHashes() []string {
-	keys := make([]string, 0, len(monthlyInfoHashes))
+	seen := make(map[string]struct{}, len(monthlyInfoHashes)+len(monthlyOverride))
 	for k := range monthlyInfoHashes {
+		seen[k] = struct{}{}
+	}
+	for k := range monthlyOverride {
+		seen[k] = struct{}{}
+	}
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
