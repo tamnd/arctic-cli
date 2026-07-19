@@ -155,6 +155,13 @@ func (a *App) setup(cmd *cobra.Command) error {
 		return codeError(exitUsage, fmt.Errorf("unknown engine %q (want go or duckdb)", a.engine))
 	}
 	a.cfg.Engine = arctic.Engine(a.engine)
+
+	// Layer any months learned by `catalog refresh` over the compiled-in map so
+	// this binary resolves dumps published after it was built. A missing or
+	// unreadable cache is not fatal: the built-in catalog still stands.
+	if m, err := arctic.LoadMonthlyCache(arctic.MonthlyCachePath(a.cfg)); err == nil {
+		arctic.RegisterMonthlyHashes(m)
+	}
 	return nil
 }
 
