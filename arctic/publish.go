@@ -93,13 +93,25 @@ func Publish(ctx context.Context, cfg Config, opts PublishOptions, cb func(strin
 		return nil
 	}
 
+	progressPath := ProgressPath(cfg)
+	prog, err := LoadProgress(progressPath)
+	if err != nil {
+		cb(fmt.Sprintf("progress ledger unreadable, months restart from shard 0: %v", err))
+		prog = map[string]ShardProgress{}
+	}
+
 	p := &publisher{
-		cfg:       cfg,
-		opts:      opts,
-		budget:    budget,
-		hf:        hf,
-		statsPath: statsPath,
-		cb:        cb,
+		cfg:          cfg,
+		opts:         opts,
+		budget:       budget,
+		hf:           hf,
+		statsPath:    statsPath,
+		progressPath: progressPath,
+		cb:           cb,
+		progress:     prog,
+	}
+	if hf != nil {
+		p.upload = hf.UploadFiles
 	}
 	p.markProgress()
 
@@ -113,25 +125,31 @@ type publishJob struct {
 	Month Month
 	Type  Type
 
-	zstPath string
-	result  ProcessResult
-	durDown time.Duration
-	durProc time.Duration
-	durComm time.Duration
+	zstPath    string
+	startShard int // first shard to produce; > 0 resumes a partly-committed month
+	result     ProcessResult
+	durDown    time.Duration
+	durProc    time.Duration
+	durComm    time.Duration
 }
 
 type publisher struct {
-	cfg       Config
-	opts      PublishOptions
-	budget    Budget
-	hf        *HFClient
-	statsPath string
-	cb        func(string)
+	cfg          Config
+	opts         PublishOptions
+	budget       Budget
+	hf           *HFClient
+	upload       func(ctx context.Context, ops []HFOp) error // hub upload, nil in dry runs
+	statsPath    string
+	progressPath string
+	cb           func(string)
 
 	statsMu    sync.Mutex
 	commitMu   sync.Mutex
 	lastCommit atomic.Int64 // unix nanos of the last forward progress (processed shard or commit)
 	stalled    atomic.Bool
+
+	progressMu sync.Mutex
+	progress   map[string]ShardProgress // in-flight month progress, keyed like the ledger
 }
 
 // markProgress records that the pipeline moved forward, resetting the stall
@@ -300,44 +318,105 @@ func (p *publisher) download(ctx context.Context, job *publishJob) error {
 	return nil
 }
 
+// process converts a month's .zst to Parquet shards and, when committing,
+// uploads them to the hub in batches of cfg.CommitEveryShards as they land
+// rather than all at once. A month that an earlier run committed part of resumes
+// after its committed shards.
 func (p *publisher) process(ctx context.Context, job *publishJob) error {
 	start := time.Now()
 	p.cb(fmt.Sprintf("process %s %s", job.Month, job.Type))
+
+	key := statsKey(job)
+	seed := p.resumeSeed(key)
+	job.startShard = seed.Shards
+	job.result = ProcessResult{Shards: seed.Shards, Records: seed.Records, Bytes: seed.Bytes}
+	if seed.Shards > 0 {
+		p.cb(fmt.Sprintf("resume %s %s: %d shards already committed", job.Month, job.Type, seed.Shards))
+	}
+
 	pathFn := func(n int) string {
 		return filepath.Join(p.cfg.RepoRoot, ShardHFPath(job.Type, job.Month, n))
 	}
-	res, err := ProcessFileTo(ctx, p.cfg, job.zstPath, job.Type, pathFn, func(int64) {
-		p.markProgress()
-	})
-	if err != nil {
+
+	committing := p.opts.HFCommit && p.upload != nil
+	every := p.cfg.CommitEveryShards
+	var batch []ShardDone
+
+	onShard := func(s ShardDone) error {
+		job.result.Shards = s.N + 1
+		job.result.Records += s.Records
+		job.result.Bytes += s.Bytes
+		if !committing {
+			p.markProgress()
+			return nil
+		}
+		batch = append(batch, s)
+		if every > 0 && len(batch) >= every {
+			return p.commitBatch(ctx, job, &batch)
+		}
+		return nil
+	}
+
+	if _, err := ProcessFileStream(ctx, p.cfg, job.zstPath, job.Type, pathFn, ProcessConfig{
+		StartShard: job.startShard,
+		OnProgress: func(int64) { p.markProgress() },
+		OnShard:    onShard,
+	}); err != nil {
 		return err
 	}
-	job.result = res
+	// Flush the trailing shards (and, when every == 0, the whole month).
+	if committing && len(batch) > 0 {
+		if err := p.commitBatch(ctx, job, &batch); err != nil {
+			return err
+		}
+	}
+
 	job.durProc = time.Since(start)
-	p.cb(fmt.Sprintf("process %s %s: %d shards, %d records", job.Month, job.Type, res.Shards, res.Records))
+	p.cb(fmt.Sprintf("process %s %s: %d shards, %d records", job.Month, job.Type, job.result.Shards, job.result.Records))
 	return nil
 }
 
-func (p *publisher) commit(ctx context.Context, job *publishJob) error {
-	start := time.Now()
-
-	if p.opts.HFCommit && p.hf != nil {
-		// One commit per repo at a time.
-		p.commitMu.Lock()
-		err := p.commitShards(ctx, job)
-		p.commitMu.Unlock()
-		if err != nil {
-			return err
-		}
-		p.markProgress()
+// commitBatch uploads a batch of freshly written shards to the hub, records how
+// far the month has progressed, and drops the local copies so disk stays low.
+func (p *publisher) commitBatch(ctx context.Context, job *publishJob, batch *[]ShardDone) error {
+	if len(*batch) == 0 {
+		return nil
+	}
+	ops := make([]HFOp, 0, len(*batch))
+	for _, s := range *batch {
+		rel := ShardHFPath(job.Type, job.Month, s.N)
+		ops = append(ops, HFOp{LocalPath: s.Path, PathInRepo: filepath.ToSlash(rel)})
 	}
 
-	job.durComm = time.Since(start)
+	cstart := time.Now()
+	p.commitMu.Lock() // one commit per repo at a time
+	err := p.upload(ctx, ops)
+	p.commitMu.Unlock()
+	if err != nil {
+		return err
+	}
+	job.durComm += time.Since(cstart)
 
-	// Record the month in the ledger and regenerate the README.
+	p.setProgress(job)
+	if !p.opts.Keep {
+		for _, s := range *batch {
+			_ = os.Remove(s.Path)
+		}
+	}
+	*batch = (*batch)[:0]
+	p.markProgress()
+	p.cb(fmt.Sprintf("commit %s %s: %d shards on hub", job.Month, job.Type, job.result.Shards))
+	return nil
+}
+
+// commit finalizes a month whose shards are already on the hub: it appends the
+// ledger row, regenerates and pushes the README, clears the progress marker, and
+// removes the local .zst and any leftover shards.
+func (p *publisher) commit(ctx context.Context, job *publishJob) error {
 	if err := p.recordAndREADME(ctx, job); err != nil {
 		return err
 	}
+	p.clearProgress(statsKey(job))
 	p.cb(fmt.Sprintf("committed %s %s", job.Month, job.Type))
 
 	if !p.opts.Keep {
@@ -346,19 +425,50 @@ func (p *publisher) commit(ctx context.Context, job *publishJob) error {
 	return nil
 }
 
-func (p *publisher) commitShards(ctx context.Context, job *publishJob) error {
-	var ops []HFOp
-	for n := 0; n < job.result.Shards; n++ {
-		rel := ShardHFPath(job.Type, job.Month, n)
-		ops = append(ops, HFOp{
-			LocalPath:  filepath.Join(p.cfg.RepoRoot, rel),
-			PathInRepo: filepath.ToSlash(rel),
-		})
+// statsKey is the ledger and progress key for a job.
+func statsKey(job *publishJob) string {
+	return StatsRow{Year: job.Month.Year, Month: job.Month.Month, Type: string(job.Type)}.Key()
+}
+
+// resumeSeed returns the committed progress for a month, but only when it was
+// written by the current engine: the two engines draw shard boundaries
+// differently, so resuming across engines would misalign the shards.
+func (p *publisher) resumeSeed(key string) ShardProgress {
+	p.progressMu.Lock()
+	defer p.progressMu.Unlock()
+	sp, ok := p.progress[key]
+	if !ok || sp.Engine != string(p.cfg.Engine) {
+		return ShardProgress{}
 	}
-	if len(ops) == 0 {
-		return nil
+	return sp
+}
+
+// setProgress records a month's committed shard count so a restart resumes here.
+func (p *publisher) setProgress(job *publishJob) {
+	p.progressMu.Lock()
+	defer p.progressMu.Unlock()
+	p.progress[statsKey(job)] = ShardProgress{
+		Engine:  string(p.cfg.Engine),
+		Shards:  job.result.Shards,
+		Records: job.result.Records,
+		Bytes:   job.result.Bytes,
 	}
-	return p.hf.UploadFiles(ctx, ops)
+	if err := SaveProgress(p.progressPath, p.progress); err != nil {
+		p.cb(fmt.Sprintf("warn: save progress %s: %v", statsKey(job), err))
+	}
+}
+
+// clearProgress drops a month from the progress ledger once it is fully done.
+func (p *publisher) clearProgress(key string) {
+	p.progressMu.Lock()
+	defer p.progressMu.Unlock()
+	if _, ok := p.progress[key]; !ok {
+		return
+	}
+	delete(p.progress, key)
+	if err := SaveProgress(p.progressPath, p.progress); err != nil {
+		p.cb(fmt.Sprintf("warn: clear progress %s: %v", key, err))
+	}
 }
 
 func (p *publisher) recordAndREADME(ctx context.Context, job *publishJob) error {
@@ -393,10 +503,10 @@ func (p *publisher) recordAndREADME(ctx context.Context, job *publishJob) error 
 	if err := os.WriteFile(readmePath, []byte(readme), 0o644); err != nil {
 		return err
 	}
-	// Push the ledger and README alongside the shards when committing.
-	if p.opts.HFCommit && p.hf != nil {
+	// Push the ledger and README once the month's shards are all on the hub.
+	if p.opts.HFCommit && p.upload != nil {
 		p.commitMu.Lock()
-		err := p.hf.UploadFiles(ctx, []HFOp{
+		err := p.upload(ctx, []HFOp{
 			{LocalPath: p.statsPath, PathInRepo: "stats.csv"},
 			{LocalPath: readmePath, PathInRepo: "README.md"},
 		})

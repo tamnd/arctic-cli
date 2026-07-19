@@ -25,7 +25,7 @@ import (
 // with ignore_errors mirrors the Go engine's skip-on-bad-line behavior. This
 // path pulls a cgo dependency and is never in the default build.
 func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, pathFn ShardPathFunc,
-	cb func(done int64)) (ProcessResult, error) {
+	pc ProcessConfig) (ProcessResult, error) {
 
 	chunkLines := cfg.ChunkLines
 	if chunkLines <= 0 {
@@ -68,6 +68,9 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 		lineInChunk int
 		lineCount   int64
 	)
+	// openChunk starts a fresh JSONL chunk file. It is opened lazily, only once
+	// real (non-skipped) data arrives, so fast-forwarding past committed shards
+	// touches no disk.
 	openChunk := func() error {
 		chunkPath = filepath.Join(work, fmt.Sprintf("chunk_%03d.jsonl", chunkIdx))
 		chunkIdx++
@@ -83,13 +86,20 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 
 	// convertChunk finalizes the current chunk file, turns it into one Parquet
 	// shard, and removes the JSONL so it never accumulates. An empty chunk (a
-	// clean chunk boundary at EOF) is just dropped.
+	// clean chunk boundary at EOF) is just dropped. It always clears chunkWriter
+	// so the next line reopens a chunk.
 	convertChunk := func() error {
-		if err := chunkWriter.Flush(); err != nil {
-			return err
+		if chunkWriter == nil {
+			return nil
 		}
-		if err := chunkFile.Close(); err != nil {
-			return err
+		flushErr := chunkWriter.Flush()
+		closeErr := chunkFile.Close()
+		chunkWriter = nil
+		if flushErr != nil {
+			return flushErr
+		}
+		if closeErr != nil {
+			return closeErr
 		}
 		fi, statErr := os.Stat(chunkPath)
 		if statErr != nil || fi.Size() == 0 {
@@ -111,35 +121,49 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 		res.Shards++
 		res.Records += rows
 		res.Bytes += size
+		if pc.OnShard != nil {
+			if err := pc.OnShard(ShardDone{N: shardN, Path: shardPath, Records: rows, Bytes: size}); err != nil {
+				return err
+			}
+		}
 		shardN++
 		_ = os.Remove(chunkPath)
 		return nil
 	}
 
-	if err := openChunk(); err != nil {
-		return res, err
-	}
 	for scanner.Scan() {
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
 		line := scanner.Bytes()
 		lineCount++
-		if cb != nil && lineCount%200000 == 0 {
-			cb(lineCount)
+		if pc.OnProgress != nil && lineCount%200000 == 0 {
+			pc.OnProgress(lineCount)
 		}
 		if len(line) == 0 || line[0] != '{' {
 			res.SkippedLines++
 			continue
+		}
+		// Fast-forward past already-committed shards: count lines to keep the
+		// chunk boundaries identical, but write no chunk file.
+		if shardN < pc.StartShard {
+			lineInChunk++
+			if lineInChunk >= chunkLines {
+				shardN++
+				lineInChunk = 0
+			}
+			continue
+		}
+		if chunkWriter == nil {
+			if err := openChunk(); err != nil {
+				return res, err
+			}
 		}
 		_, _ = chunkWriter.Write(line)
 		_ = chunkWriter.WriteByte('\n')
 		lineInChunk++
 		if lineInChunk >= chunkLines {
 			if err := convertChunk(); err != nil {
-				return res, err
-			}
-			if err := openChunk(); err != nil {
 				return res, err
 			}
 		}
@@ -152,8 +176,8 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 	if err := convertChunk(); err != nil {
 		return res, err
 	}
-	if cb != nil {
-		cb(lineCount)
+	if pc.OnProgress != nil {
+		pc.OnProgress(lineCount)
 	}
 	return res, nil
 }

@@ -11,6 +11,7 @@ import (
 func (a *App) publishCmd() *cobra.Command {
 	var fromS, toS, kind, repo string
 	var commit, private, keep bool
+	commitEvery := a.cfg.CommitEveryShards
 	cmd := &cobra.Command{
 		Use:   "publish",
 		Short: "Convert a month range and upload the shards to Hugging Face",
@@ -37,6 +38,7 @@ func (a *App) publishCmd() *cobra.Command {
 			if repo != "" {
 				a.cfg.HFRepo = repo
 			}
+			a.cfg.CommitEveryShards = commitEvery
 			if commit && os.Getenv("HF_TOKEN") == "" {
 				return codeError(exitUsage, fmt.Errorf("--commit needs HF_TOKEN in the environment"))
 			}
@@ -64,5 +66,6 @@ func (a *App) publishCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&commit, "commit", false, "upload to Hugging Face (default: dry run)")
 	cmd.Flags().BoolVar(&private, "private", false, "create the dataset repo as private")
 	cmd.Flags().BoolVar(&keep, "keep", false, "keep local Parquet after a successful commit")
+	cmd.Flags().IntVar(&commitEvery, "commit-every", a.cfg.CommitEveryShards, "commit to the hub every N shards within a month (0 = once at month end)")
 	return cmd
 }
