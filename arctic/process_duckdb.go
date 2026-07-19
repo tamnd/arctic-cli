@@ -16,10 +16,14 @@ import (
 	_ "github.com/marcboeker/go-duckdb"
 )
 
-// processDuckDB decodes the .zst, writes chunks of cfg.ChunkLines to temporary
-// JSONL files, and turns each chunk into a Parquet shard with a single DuckDB
-// COPY. read_json with ignore_errors mirrors the Go engine's skip-on-bad-line
-// behavior. This path pulls a cgo dependency and is never in the default build.
+// processDuckDB decodes the .zst and turns each cfg.ChunkLines-sized run of
+// JSONL into a Parquet shard with a single DuckDB COPY. Each chunk is written
+// to one temporary JSONL file, converted, and deleted before the next chunk is
+// filled, so disk never holds more than one uncompressed chunk plus its shard
+// at a time. That matters for the comments dumps, whose uncompressed JSONL runs
+// to hundreds of GB and would overrun the disk if staged all at once. read_json
+// with ignore_errors mirrors the Go engine's skip-on-bad-line behavior. This
+// path pulls a cgo dependency and is never in the default build.
 func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, pathFn ShardPathFunc,
 	cb func(done int64)) (ProcessResult, error) {
 
@@ -38,21 +42,20 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 	defer func() { _ = os.RemoveAll(work) }()
 
 	zstdDecoderSem.Lock()
+	defer zstdDecoderSem.Unlock()
 	f, err := os.Open(zstPath)
 	if err != nil {
-		zstdDecoderSem.Unlock()
 		return ProcessResult{}, fmt.Errorf("open zst: %w", err)
 	}
+	defer func() { _ = f.Close() }()
 	dec, err := zstd.NewReader(f, zstd.WithDecoderMaxWindow(1<<31))
 	if err != nil {
-		_ = f.Close()
-		zstdDecoderSem.Unlock()
 		return ProcessResult{}, fmt.Errorf("zstd reader: %w", err)
 	}
+	defer dec.Close()
 
 	var res ProcessResult
 	shardN := 0
-	var chunkPaths []string
 
 	scanner := bufio.NewScanner(dec)
 	scanner.Buffer(make([]byte, 16*1024*1024), 16*1024*1024)
@@ -60,46 +63,65 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 	var (
 		chunkFile   *os.File
 		chunkWriter *bufio.Writer
+		chunkPath   string
+		chunkIdx    int
 		lineInChunk int
 		lineCount   int64
 	)
 	openChunk := func() error {
-		p := filepath.Join(work, fmt.Sprintf("chunk_%03d.jsonl", len(chunkPaths)))
-		cf, e := os.Create(p)
+		chunkPath = filepath.Join(work, fmt.Sprintf("chunk_%03d.jsonl", chunkIdx))
+		chunkIdx++
+		cf, e := os.Create(chunkPath)
 		if e != nil {
 			return e
 		}
-		chunkPaths = append(chunkPaths, p)
 		chunkFile = cf
 		chunkWriter = bufio.NewWriterSize(cf, 8*1024*1024)
+		lineInChunk = 0
 		return nil
 	}
-	if err := openChunk(); err != nil {
-		dec.Close()
-		_ = f.Close()
-		zstdDecoderSem.Unlock()
-		return res, err
-	}
 
-	flush := func() error {
-		if lineInChunk == 0 {
-			return nil
-		}
+	// convertChunk finalizes the current chunk file, turns it into one Parquet
+	// shard, and removes the JSONL so it never accumulates. An empty chunk (a
+	// clean chunk boundary at EOF) is just dropped.
+	convertChunk := func() error {
 		if err := chunkWriter.Flush(); err != nil {
 			return err
 		}
 		if err := chunkFile.Close(); err != nil {
 			return err
 		}
-		lineInChunk = 0
-		return openChunk()
+		fi, statErr := os.Stat(chunkPath)
+		if statErr != nil || fi.Size() == 0 {
+			_ = os.Remove(chunkPath)
+			return nil
+		}
+		shardPath := pathFn(shardN)
+		if err := os.MkdirAll(filepath.Dir(shardPath), 0o755); err != nil {
+			return err
+		}
+		rows, size, err := duckConvert(ctx, cfg, chunkPath, t, shardPath)
+		if err != nil {
+			return err
+		}
+		if err := ValidateParquet(shardPath); err != nil {
+			_ = os.Remove(shardPath)
+			return fmt.Errorf("validate shard %d: %w", shardN, err)
+		}
+		res.Shards++
+		res.Records += rows
+		res.Bytes += size
+		shardN++
+		_ = os.Remove(chunkPath)
+		return nil
 	}
 
-	var loopErr error
+	if err := openChunk(); err != nil {
+		return res, err
+	}
 	for scanner.Scan() {
 		if ctx.Err() != nil {
-			loopErr = ctx.Err()
-			break
+			return res, ctx.Err()
 		}
 		line := scanner.Bytes()
 		lineCount++
@@ -114,49 +136,21 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 		_ = chunkWriter.WriteByte('\n')
 		lineInChunk++
 		if lineInChunk >= chunkLines {
-			if err := flush(); err != nil {
-				loopErr = err
-				break
+			if err := convertChunk(); err != nil {
+				return res, err
+			}
+			if err := openChunk(); err != nil {
+				return res, err
 			}
 		}
 	}
-	if loopErr == nil {
-		if err := scanner.Err(); err != nil {
-			loopErr = fmt.Errorf("scan jsonl: %w", err)
-		} else if err := chunkWriter.Flush(); err != nil {
-			loopErr = err
-		} else if err := chunkFile.Close(); err != nil {
-			loopErr = err
-		}
+	if err := scanner.Err(); err != nil {
+		return res, fmt.Errorf("scan jsonl: %w", err)
 	}
-	dec.Close()
-	_ = f.Close()
-	zstdDecoderSem.Unlock()
-	if loopErr != nil {
-		return res, loopErr
-	}
-
-	for _, cp := range chunkPaths {
-		fi, statErr := os.Stat(cp)
-		if statErr != nil || fi.Size() == 0 {
-			continue
-		}
-		shardPath := pathFn(shardN)
-		if err := os.MkdirAll(filepath.Dir(shardPath), 0o755); err != nil {
-			return res, err
-		}
-		rows, size, err := duckConvert(ctx, cfg, cp, t, shardPath)
-		if err != nil {
-			return res, err
-		}
-		if err := ValidateParquet(shardPath); err != nil {
-			_ = os.Remove(shardPath)
-			return res, fmt.Errorf("validate shard %d: %w", shardN, err)
-		}
-		res.Shards++
-		res.Records += rows
-		res.Bytes += size
-		shardN++
+	// Convert the trailing partial chunk (a no-op when the last boundary landed
+	// exactly at EOF).
+	if err := convertChunk(); err != nil {
+		return res, err
 	}
 	if cb != nil {
 		cb(lineCount)
