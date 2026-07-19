@@ -71,6 +71,10 @@ var monthlyInfoHashes = map[string]string{
 	// 2026
 	"2026-01": "8412b89151101d88c915334c45d9c223169a1a60",
 	"2026-02": "c5ba00048236b60f819dbf010e9034d24fc291fb",
+	"2026-03": "668087bb8c8c9c763b27a1a4c5e7fcb6add25f2c",
+	"2026-04": "85d017ddd06920534187e7d45f21c7cec90c9bca",
+	"2026-05": "55199eff9368cde1f5c1262dd7c1af09f7503ea5",
+	"2026-06": "3bac8bd352bbb74bbb23df4273cf3da5d66ee5a5",
 }
 
 // Per-subreddit bundle: the top forty thousand communities repackaged by
