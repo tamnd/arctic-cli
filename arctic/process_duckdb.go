@@ -41,8 +41,7 @@ func processDuckDB(ctx context.Context, cfg Config, zstPath string, t Type, path
 	}
 	defer func() { _ = os.RemoveAll(work) }()
 
-	zstdDecoderSem.Lock()
-	defer zstdDecoderSem.Unlock()
+	defer acquireDecoder()()
 	f, err := os.Open(zstPath)
 	if err != nil {
 		return ProcessResult{}, fmt.Errorf("open zst: %w", err)
