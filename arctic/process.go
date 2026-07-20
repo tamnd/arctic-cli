@@ -14,11 +14,38 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// zstdDecoderSem guards the 2 GB-window decoder. The bulk dumps are compressed
-// with a 2 GB window, so each decoder allocates a buffer that large. Allowing
-// only one at a time keeps a small machine from doubling its resident set and
-// getting OOM-killed when two months decode at once.
-var zstdDecoderSem sync.Mutex
+// decodeGate limits how many months hold the 2 GB-window decoder at once. Each
+// decoder allocates a buffer that large, so on a small box only one at a time is
+// safe; a machine with RAM to spare can decode several giant dumps in parallel,
+// which is the throughput lever for a backlog of large months. It is sized once
+// by SetDecodeConcurrency before any processing starts and defaults to one.
+var (
+	decodeGateMu sync.Mutex
+	decodeGate   = make(chan struct{}, 1)
+)
+
+// SetDecodeConcurrency sizes the decoder gate to n concurrent decodes. A value
+// below one is treated as one. Call it before processing begins; it replaces the
+// gate wholesale, so it must not run while a decode holds a token.
+func SetDecodeConcurrency(n int) {
+	if n < 1 {
+		n = 1
+	}
+	decodeGateMu.Lock()
+	decodeGate = make(chan struct{}, n)
+	decodeGateMu.Unlock()
+}
+
+// acquireDecoder blocks until a decode slot is free and returns a release
+// function. It captures the current gate so a later resize never routes a
+// release to the wrong channel.
+func acquireDecoder() func() {
+	decodeGateMu.Lock()
+	gate := decodeGate
+	decodeGateMu.Unlock()
+	gate <- struct{}{}
+	return func() { <-gate }
+}
 
 // ProcessResult summarizes what one .zst file produced.
 type ProcessResult struct {
@@ -110,18 +137,18 @@ func processFile(ctx context.Context, cfg Config, zstPath string, t Type, pathFn
 		}
 	}
 
-	// Hold the decoder semaphore for the scan phase only. Once the file is fully
-	// read the 2 GB window is freed and another month may begin decoding.
-	zstdDecoderSem.Lock()
+	// Hold a decoder slot for the scan phase only. Once the file is fully read
+	// the 2 GB window is freed and another month may begin decoding.
+	releaseDecoder := acquireDecoder()
 	f, err := os.Open(zstPath)
 	if err != nil {
-		zstdDecoderSem.Unlock()
+		releaseDecoder()
 		return ProcessResult{}, fmt.Errorf("open zst: %w", err)
 	}
 	dec, err := zstd.NewReader(f, zstd.WithDecoderMaxWindow(1<<31))
 	if err != nil {
 		_ = f.Close()
-		zstdDecoderSem.Unlock()
+		releaseDecoder()
 		return ProcessResult{}, fmt.Errorf("zstd reader: %w", err)
 	}
 
@@ -245,7 +272,7 @@ scan:
 	_ = f.Close()
 	runtime.GC()
 	debug.FreeOSMemory()
-	zstdDecoderSem.Unlock()
+	releaseDecoder()
 
 	if loopErr != nil {
 		return res, loopErr

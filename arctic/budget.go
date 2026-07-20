@@ -17,6 +17,10 @@ type Budget struct {
 	MaxProcess int
 	// MaxConvertWorkers is how many Parquet conversions run per decoded month.
 	MaxConvertWorkers int
+	// MaxDecodes is how many months hold the 2 GB-window zstd decoder at once.
+	// One is safe on a small box; a host with spare RAM decodes several giant
+	// dumps in parallel, which is the throughput lever for a large backlog.
+	MaxDecodes int
 	// DuckDBMemoryMB caps the DuckDB engine when the build carries it.
 	DuckDBMemoryMB int
 	// Sequential is set when the machine is too small for any overlap: one
@@ -29,7 +33,7 @@ type Budget struct {
 // convert caps scaled by RAM and CPU, and DuckDB memory that grows on large
 // hosts.
 func ComputeBudget(hw HardwareProfile) Budget {
-	b := Budget{DuckDBMemoryMB: 512}
+	b := Budget{DuckDBMemoryMB: 512, MaxDecodes: 1}
 
 	// A machine with under 2 GB RAM or under 30 GB free disk has no safe
 	// parallel plan: one 2 GB decode plus the OS already runs it close to the
@@ -63,6 +67,15 @@ func ComputeBudget(hw HardwareProfile) Budget {
 	}
 	if b.MaxProcess < 1 {
 		b.MaxProcess = 1
+	}
+
+	// Decoding is the throughput wall for a backlog of huge months. A second
+	// concurrent 2 GB-window decode roughly doubles it, but only when RAM can
+	// hold both windows plus their conversions at once, so budget about 8 GB per
+	// decode slot and never run more decodes than process slots.
+	b.MaxDecodes = clamp(int(usableRAM/8.0), 1, 3)
+	if b.MaxDecodes > b.MaxProcess {
+		b.MaxDecodes = b.MaxProcess
 	}
 
 	// Conversion is CPU-bound and cheaper on memory than decoding. Budget it
@@ -109,6 +122,12 @@ func applyBudgetOverrides(b Budget, cfg Config) Budget {
 	if cfg.MaxConvertWorkers > 0 {
 		b.MaxConvertWorkers = cfg.MaxConvertWorkers
 	}
+	if cfg.MaxDecodes > 0 {
+		b.MaxDecodes = cfg.MaxDecodes
+	}
+	if b.MaxDecodes < 1 {
+		b.MaxDecodes = 1
+	}
 	if b.MaxProcess > 1 {
 		b.Sequential = false
 	}
@@ -120,8 +139,8 @@ func (b Budget) String() string {
 	if b.Sequential {
 		return "sequential (1 download, 1 process, 1 convert)"
 	}
-	return fmt.Sprintf("pipeline: %d download, %d process, %d convert, DuckDB %d MB",
-		b.MaxDownloads, b.MaxProcess, b.MaxConvertWorkers, b.DuckDBMemoryMB)
+	return fmt.Sprintf("pipeline: %d download, %d process, %d decode, %d convert, DuckDB %d MB",
+		b.MaxDownloads, b.MaxProcess, b.MaxDecodes, b.MaxConvertWorkers, b.DuckDBMemoryMB)
 }
 
 func clamp(v, lo, hi int) int {

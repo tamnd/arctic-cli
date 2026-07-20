@@ -8,7 +8,7 @@ import (
 )
 
 func TestApplyBudgetOverrides(t *testing.T) {
-	base := Budget{MaxDownloads: 1, MaxProcess: 4, MaxConvertWorkers: 8}
+	base := Budget{MaxDownloads: 1, MaxProcess: 4, MaxConvertWorkers: 8, MaxDecodes: 1}
 
 	// A zero override keeps the computed value; a positive one wins.
 	got := applyBudgetOverrides(base, Config{MaxProcess: 2})

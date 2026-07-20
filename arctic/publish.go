@@ -50,6 +50,7 @@ func Publish(ctx context.Context, cfg Config, opts PublishOptions, cb func(strin
 
 	hw := DetectHardware(cfg.WorkDir)
 	budget := applyBudgetOverrides(ComputeBudget(hw), cfg)
+	SetDecodeConcurrency(budget.MaxDecodes)
 	cb(fmt.Sprintf("hardware: %s", hw))
 	cb(fmt.Sprintf("budget: %s", budget))
 
