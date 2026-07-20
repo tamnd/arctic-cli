@@ -54,11 +54,12 @@ type Config struct {
 	// before the publish exits with the restart code.
 	MaxCommitStall time.Duration
 
-	// MaxDownloads, MaxProcess, and MaxConvertWorkers bound concurrency. Zero
-	// means "use the computed budget".
+	// MaxDownloads, MaxProcess, MaxConvertWorkers, and MaxDecodes bound
+	// concurrency. Zero means "use the computed budget".
 	MaxDownloads      int
 	MaxProcess        int
 	MaxConvertWorkers int
+	MaxDecodes        int
 }
 
 // Environment variable names. The CLI reads these as flag defaults.
@@ -74,6 +75,7 @@ const (
 	EnvMaxDownloads   = "ARCTIC_MAX_DOWNLOADS"
 	EnvMaxProcess     = "ARCTIC_MAX_PROCESS"
 	EnvMaxConvert     = "ARCTIC_MAX_CONVERT"
+	EnvMaxDecodes     = "ARCTIC_MAX_DECODES"
 	EnvEngine         = "ARCTIC_ENGINE"
 	EnvHFToken        = "HF_TOKEN"
 	DefaultHFRepo     = "open-index/arctic"
@@ -144,6 +146,9 @@ func DefaultConfig() Config {
 	}
 	if n := envInt(EnvMaxConvert); n > 0 {
 		c.MaxConvertWorkers = n
+	}
+	if n := envInt(EnvMaxDecodes); n > 0 {
+		c.MaxDecodes = n
 	}
 	return c
 }
