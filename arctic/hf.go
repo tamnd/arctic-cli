@@ -333,10 +333,12 @@ func (c *HFClient) postCommit(ctx context.Context, files []preparedFile) error {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 
+	summary, description := commitMessage(files)
 	header := map[string]any{
 		"key": "header",
 		"value": map[string]any{
-			"summary": "arctic shard commit",
+			"summary":     summary,
+			"description": description,
 		},
 	}
 	if err := enc.Encode(header); err != nil {
